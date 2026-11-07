@@ -198,7 +198,7 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
   describe("dynamic client registration", () => {
     it("accepts https and loopback http redirect URIs, grants nothing by itself", async () => {
       const id = await registerClient(s.base, ["https://client.example/cb", "http://localhost:4000/cb", "http://127.0.0.1:4001/cb"]);
-      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM grants WHERE client_id = ?").get(id)).toEqual({ n: 0 });
+      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules WHERE client_id = ?").get(id)).toEqual({ n: 0 });
     });
     it.each([["http://evil.example/cb"], ["javascript:alert(1)"], ["https://x.example/cb#frag"], ["not a url"]])("rejects redirect URI %s", async (uri) => {
       const r = await fetch(`${s.base}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [uri] }) });
@@ -259,7 +259,7 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
       const live = await new Mcp(s.base, tokens.access_token).connect();
       expect((await live.call("list_mailboxes")).isError).toBe(false);
       const id = (s.srv.db().prepare("SELECT id FROM oauth_tokens WHERE token_hash = ?").get(sha256hex(tokens.access_token)) as any).id;
-      const r = await s.admin.postWithCsrf("/dashboard", `/tokens/${id}/revoke`, {});
+      const r = await s.admin.postWithCsrf(`/tokens/${id}/revoke`, `/tokens/${id}/revoke`, {}) /* GET confirmation page carries the CSRF token */;
       expect(r.status).toBe(302);
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(401);
       await expect(live.call("list_mailboxes")).rejects.toThrow();
@@ -273,7 +273,7 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
     });
     it("rejects tokens of a disabled client", async () => {
       const { clientId, tokens } = await obtainToken(s, [[alice, "read"]]);
-      const r = await s.admin.postWithCsrf("/dashboard", `/clients/${clientId}/disable`, {});
+      const r = await s.admin.postWithCsrf(`/clients/${clientId}/disable`, `/clients/${clientId}/disable`, {}) /* GET confirmation page carries the CSRF token */;
       expect(r.status).toBe(302);
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(401);
     });

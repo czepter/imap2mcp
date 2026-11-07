@@ -1,5 +1,8 @@
 import { ImapConnectError, ImapTimeoutError } from "../imap/client.js";
 import { PolicyError } from "../types.js";
+import {
+  RPC_STALE_REFERENCE, RPC_TIMEOUT, RPC_UPSTREAM, SidecarRpcError, SidecarTimeoutError, SidecarUnavailableError,
+} from "../sidecar/errors.js";
 
 export type ToolErrorCode =
   | "FORBIDDEN" | "NOT_FOUND" | "STALE_REFERENCE" | "INVALID_INPUT"
@@ -24,6 +27,15 @@ export function normalizeError(e: unknown, mutating = false): ToolError {
     return mutating
       ? new ToolError("UNKNOWN_OUTCOME", "Operation timed out; it may or may not have been applied. Verify before retrying.")
       : new ToolError("UPSTREAM_ERROR", "Mailbox operation timed out");
+  }
+  if (e instanceof SidecarRpcError) {
+    if (e.code === RPC_STALE_REFERENCE) return new ToolError("STALE_REFERENCE", "Message reference is stale (UIDVALIDITY changed); search again.");
+    if (e.code === RPC_UPSTREAM && /nonexist|not found|no such/i.test(e.message)) return new ToolError("NOT_FOUND", "Folder not found");
+    if (e.code === RPC_TIMEOUT) return new ToolError("UPSTREAM_ERROR", "Mailbox operation timed out");
+    return new ToolError("UPSTREAM_ERROR", "Mailbox operation failed"); // never forward sidecar text
+  }
+  if (e instanceof SidecarUnavailableError || e instanceof SidecarTimeoutError) {
+    return new ToolError("UPSTREAM_ERROR", "Mailbox service is unavailable");
   }
   const err = e as { mailboxMissing?: boolean; serverResponseCode?: string } | undefined;
   if (err?.mailboxMissing || err?.serverResponseCode === "NONEXISTENT") {

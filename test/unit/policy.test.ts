@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { assertAllowed, allowedMailboxes, anyAllowedMailboxes } from "../../src/policy/policy.js";
+import { PRESET_OPS } from "../../src/policy/rules.js";
 import { PolicyError, type Capability, type TokenContext } from "../../src/types.js";
 
 const CAPS: Capability[] = ["read", "draft", "organize"];
@@ -10,7 +11,9 @@ function ctx(clientId: string, scopes: Capability[] = CAPS): TokenContext {
   return { tokenId: "t1", clientId, scopes };
 }
 function grant(c: string, m: string, cap: Capability) {
-  db.prepare("INSERT INTO grants (client_id, mailbox_id, capability) VALUES (?,?,?)").run(c, m, cap);
+  for (const op of PRESET_OPS[cap]) {
+    db.prepare("INSERT INTO policy_rules (id, client_id, mailbox_id, folder, operation, effect) VALUES (?,?,?,?,?,?)").run(`${c}-${m}-${op}`, c, m, "*", op, "allow");
+  }
 }
 function allowed(c: TokenContext, m: string, cap: Capability): boolean {
   try { assertAllowed(c, m, cap, db); return true; } catch (e) {
@@ -23,9 +26,8 @@ function allowed(c: TokenContext, m: string, cap: Capability): boolean {
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(`
-    CREATE TABLE grants (client_id TEXT NOT NULL, mailbox_id TEXT NOT NULL,
-      capability TEXT NOT NULL CHECK (capability IN ('read','draft','organize')),
-      PRIMARY KEY (client_id, mailbox_id, capability));`);
+    CREATE TABLE policy_rules (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, mailbox_id TEXT NOT NULL, folder TEXT NOT NULL,
+      operation TEXT NOT NULL, effect TEXT NOT NULL, UNIQUE (client_id, mailbox_id, folder, operation));`);
 });
 
 describe("policy", () => {
@@ -70,7 +72,7 @@ describe("policy", () => {
     grant("c1", "m1", "read");
     const c = ctx("c1");
     expect(allowed(c, "m1", "read")).toBe(true);
-    db.prepare("DELETE FROM grants WHERE client_id='c1' AND mailbox_id='m1' AND capability='read'").run();
+    db.prepare("DELETE FROM policy_rules WHERE client_id='c1' AND mailbox_id='m1' AND operation IN ('search','read_headers','read_body')").run();
     expect(allowed(c, "m1", "read")).toBe(false);
     expect(allowedMailboxes(c, "read", db)).toEqual([]);
   });

@@ -11,7 +11,10 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration"
+    "test:integration": "vitest run test/integration",
+    "build:sidecar": "scripts/go.sh build -o bin/sidecar ./cmd/sidecar",
+    "bench": "tsx bench/run.ts",
+    "test:v1": "vitest run test/integration/v1-"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

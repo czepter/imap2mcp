@@ -349,12 +349,12 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
     it("CSRF: state-changing POSTs without a valid token are refused and change nothing", async () => {
       const before = {
         mailboxes: s.srv.db().prepare("SELECT COUNT(*) n FROM mailboxes").get(),
-        grants: s.srv.db().prepare("SELECT COUNT(*) n FROM grants").get(),
+        grants: s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules").get(),
       };
       const otherSession = new Browser(s.base);
       await adminLogin(otherSession, s.adminPassword);
-      const foreignToken = await otherSession.csrf("/dashboard");
-      await s.admin.get("/dashboard"); // make sure this session has its own token
+      const foreignToken = await otherSession.csrf(`/clients/${clientId}`); // the dashboard itself has no form any more
+      await s.admin.get(`/clients/${clientId}`); // make sure this session has its own token
 
       const attempts: Array<[string, Record<string, string>, Record<string, string>?]> = [
         ["/mailboxes", { label: "evil", host: "localhost", port: "993", username: "u", password: "p" }],
@@ -381,7 +381,7 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
       expect((await new Browser(s.base).post("/login", { password: s.adminPassword })).status).toBe(403);
 
       expect(s.srv.db().prepare("SELECT COUNT(*) n FROM mailboxes").get()).toEqual(before.mailboxes);
-      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM grants").get()).toEqual(before.grants);
+      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules").get()).toEqual(before.grants);
       expect(s.srv.db().prepare("SELECT revoked FROM oauth_tokens WHERE id = ?").get(revokeId)).toEqual({ revoked: 0 });
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(200);
       expect((await s.admin.get("/dashboard")).status).toBe(200); // still logged in

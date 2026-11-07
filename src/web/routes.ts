@@ -7,10 +7,11 @@ import { requireAdmin, csrfProtection, csrfToken, CSRF_FIELD } from "./deps.js";
 import {
   listMailboxes, getMailbox, createMailbox, updateMailbox, deleteMailbox, setDraftsFolder, testMailbox, validateMailboxInput,
 } from "../imap/mailboxes.js";
-import { layout } from "./views/layout.js";
+import { layout, card, type NavKey } from "./views/layout.js";
 import { escapeHtml as esc } from "./views/escapeHtml.js";
-import { CAPABILITIES, validRedirectUri } from "../oauth/common.js";
+import { CAPABILITIES, validRedirectUri, scopesToCaps } from "../oauth/common.js";
 import type { Capability } from "../types.js";
+import { capabilityRows, OPERATIONS, OP_CAPABILITY, PRESET_OPS, grantPreset, isOperation, isValidSelector, listRules, presetActive, revokePreset, setRule } from "../policy/rules.js";
 
 const router = Router();
 
@@ -20,8 +21,8 @@ const PREFIXES = ["/dashboard", "/mailboxes", "/clients", "/tokens"];
 router.use(PREFIXES, requireAdmin, csrfProtection);
 
 const csrf = (req: Request) => `<input type="hidden" name="${CSRF_FIELD}" value="${esc(csrfToken(req))}">`;
-const post = (req: Request, action: string, label: string, cls = "", confirm = "") =>
-  `<form method="POST" action="${esc(action)}" class="inline"${confirm ? `` : ""}>${csrf(req)}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
+const post = (req: Request, action: string, label: string, cls = "") =>
+  `<form method="POST" action="${esc(action)}" class="inline">${csrf(req)}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
 const flash = (req: Request) => {
   const m = typeof req.query.msg === "string" ? req.query.msg : "";
   const e = typeof req.query.err === "string" ? req.query.err : "";
@@ -30,60 +31,95 @@ const flash = (req: Request) => {
 const back = (res: Response, path: string, kind: "msg" | "err", text: string) =>
   res.redirect(`${path}${path.includes("?") ? "&" : "?"}${kind}=${encodeURIComponent(text)}`);
 const str = (v: unknown, max = 500) => (typeof v === "string" ? v.trim().slice(0, max) : "");
-const send = (res: Response, title: string, body: string) => res.send(layout(title, body, "admin"));
+const send = (res: Response, title: string, body: string, active?: NavKey) => res.send(layout(title, body, "admin", active));
+const pill = (cap: string) => `<span class="pill ${esc(cap)}">${esc(cap)}</span>`;
+const when = (iso: string) => esc(iso.replace("T", " ").slice(0, 16)) + " UTC";
+const reRaw = (v: string) => v.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 
 // ---------------- Dashboard ----------------
 router.get("/dashboard", (req, res) => {
   const db = getDb();
   const mailboxes = listMailboxes();
   const clients = db.prepare("SELECT client_id, client_name, created_at, disabled FROM oauth_clients ORDER BY created_at DESC").all() as any[];
+  const grantRows = capabilityRows(db);
+  const granted = new Map<string, Set<string>>(); // `${client}:${mailbox}` -> caps
+  for (const g of grantRows) {
+    const k = `${g.client_id}:${g.mailbox_id}`;
+    if (!granted.has(k)) granted.set(k, new Set());
+    granted.get(k)!.add(g.capability);
+  }
   const tokens = db.prepare(
-    `SELECT t.id, t.client_id, t.scopes, t.expires_at, t.refresh_expires_at, t.created_at, c.client_name
+    `SELECT t.id, t.client_id, t.scopes, t.expires_at, t.created_at, c.client_name
        FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id
       WHERE t.revoked = 0 AND (t.expires_at > ? OR (t.refresh_expires_at IS NOT NULL AND t.refresh_expires_at > ?))
       ORDER BY t.created_at DESC`
   ).all(new Date().toISOString(), new Date().toISOString()) as any[];
 
-  const mbRows = mailboxes.map((m) => `<tr><td>${esc(m.label)}</td><td>${esc(m.imap_host)}:${m.imap_port}</td><td>${esc(m.imap_username)}</td>
-    <td>${m.drafts_folder ? esc(m.drafts_folder) : '<span class="small">not set</span>'}</td><td><a href="/mailboxes/${esc(m.id)}">Manage</a></td></tr>`).join("");
-  const clRows = clients.map((c) => `<tr><td>${esc(c.client_name || "(unnamed)")}<div class="small">${esc(c.client_id)}</div></td>
-    <td>${c.disabled ? "disabled" : "active"}</td><td><a href="/clients/${esc(c.client_id)}">Grants</a>
-    ${post(req, `/clients/${encodeURIComponent(c.client_id)}/${c.disabled ? "enable" : "disable"}`, c.disabled ? "Enable" : "Disable")}</td></tr>`).join("");
-  const tkRows = tokens.map((t) => `<tr><td>${esc(t.client_name || t.client_id)}</td><td>${esc(t.scopes)}</td><td class="small">${esc(t.created_at)}</td>
-    <td class="small">${esc(t.expires_at)}</td><td>${post(req, `/tokens/${encodeURIComponent(t.id)}/revoke`, "Revoke", "btn-danger")}</td></tr>`).join("");
+  const capPills = (set?: Set<string>) => (set && set.size ? CAPABILITIES.filter((c) => set.has(c)).map(pill).join(" ") : `<span class="none">\u2014</span>`);
+  const noDrafts = mailboxes.filter((m) => !m.drafts_folder);
+  const warn = noDrafts.length
+    ? `<div class="alert warn" role="status"><span>${noDrafts.map((m) => `<b>${esc(m.label)}</b>`).join(", ")} ${noDrafts.length === 1 ? "has" : "have"} no Drafts folder. <b>draft</b> grants there do not work until you pick one.</span><a href="/mailboxes/${esc(noDrafts[0].id)}">Fix it</a></div>`
+    : "";
 
-  send(res, "Dashboard", `${flash(req)}
-  <div class="card"><h2>Mailboxes</h2>
-    ${mailboxes.length ? `<table><tr><th>Label</th><th>Server</th><th>User</th><th>Drafts</th><th></th></tr>${mbRows}</table>` : "<p>No mailboxes yet.</p>"}
-    <a class="btn" href="/mailboxes/new">Add mailbox</a></div>
-  <div class="card"><h2>Clients</h2>
-    ${clients.length ? `<table><tr><th>Client</th><th>Status</th><th></th></tr>${clRows}</table>` : "<p>No clients registered.</p>"}
-    ${config.registrationMode === "admin" ? `<h3 style="margin-top:16px">Add client</h3>
-    <form method="POST" action="/clients">${csrf(req)}
-      <label>Name</label><input type="text" name="client_name" maxlength="100" required>
-      <label>Redirect URIs (one per line; https or http://localhost)</label><textarea name="redirect_uris" rows="3" style="width:100%" required></textarea>
-      <button type="submit">Create client</button></form>`
-      : `<p class="small">Clients register themselves dynamically (REGISTRATION_MODE=dynamic). Registration grants no access.</p>`}</div>
-  <div class="card"><h2>Active tokens</h2>
-    ${tokens.length ? `<table><tr><th>Client</th><th>Scopes</th><th>Issued</th><th>Access expires</th><th></th></tr>${tkRows}</table>` : "<p>No active tokens.</p>"}</div>`);
+  const mapRows = clients.map((c) => `<tr><th scope="row">${esc(c.client_name || "(unnamed)")}${c.disabled ? ` <span class="pill off">disabled</span>` : ""}<div class="sub mono" style="font-weight:400">${esc(c.client_id)}</div></th>
+    ${mailboxes.map((m) => `<td>${capPills(granted.get(`${c.client_id}:${m.id}`))}</td>`).join("")}
+    <td class="r">${c.disabled ? post(req, `/clients/${encodeURIComponent(c.client_id)}/enable`, "Enable", "s") : `<a class="btn s" href="/clients/${esc(c.client_id)}">Edit grants</a>`}</td></tr>`).join("");
+  const map = mailboxes.length && clients.length
+    ? `<div class="scroll"><table><thead><tr><th scope="col">Client</th>${mailboxes.map((m) => `<th scope="col">${esc(m.label)}</th>`).join("")}<th></th></tr></thead><tbody>${mapRows}</tbody></table></div>`
+    : `<p class="pad sub">${mailboxes.length ? "No clients registered yet." : "Add a mailbox first, then connect a client."}</p>`;
+
+  const clientCount = (mid: string) => new Set(grantRows.filter((g) => g.mailbox_id === mid).map((g) => g.client_id)).size;
+  const mbRows = mailboxes.map((m) => `<tr><td><b>${esc(m.label)}</b></td><td class="mono">${esc(m.imap_host)}:${m.imap_port}</td><td>${esc(m.imap_username)}</td>
+    <td>${m.drafts_folder ? esc(m.drafts_folder) : '<span class="pill warn">not set</span>'}</td><td>${clientCount(m.id) || '<span class="none">0</span>'}</td><td class="r"><a class="btn s" href="/mailboxes/${esc(m.id)}">Manage</a></td></tr>`).join("");
+
+  const mbLabel = new Map(mailboxes.map((m) => [m.id, m.label]));
+  const reach = (t: any) => {
+    const ceiling = new Set<string>(scopesToCaps(t.scopes));
+    const lines = mailboxes.map((m) => {
+      const live = CAPABILITIES.filter((c) => ceiling.has(c) && granted.get(`${t.client_id}:${m.id}`)?.has(c));
+      return live.length ? `<div>${esc(mbLabel.get(m.id) ?? m.id)} ${live.map(pill).join(" ")}</div>` : "";
+    }).join("");
+    return lines || `<span class="none">nothing (all grants removed)</span>`;
+  };
+  const tkRows = tokens.map((t) => `<tr><td><b>${esc(t.client_name || t.client_id)}</b></td><td>${reach(t)}</td><td class="sub">${when(t.created_at)}</td>
+    <td class="sub">${when(t.expires_at)}</td><td class="r"><a class="btn s d" href="/tokens/${encodeURIComponent(t.id)}/revoke">Revoke</a></td></tr>`).join("");
+
+  const addClient = config.registrationMode === "admin"
+    ? `<form method="POST" action="/clients" class="pad" style="border-top:1px solid var(--line)">${csrf(req)}<h3 style="font-size:14px">Add client</h3>
+      <label for="cn">Name</label><input id="cn" type="text" name="client_name" maxlength="100" required>
+      <label for="ru">Redirect URIs (one per line; https or http://localhost)</label><textarea id="ru" name="redirect_uris" rows="3" style="width:100%;border:1px solid var(--line-strong);border-radius:8px;padding:8px 12px;font:inherit;background:var(--surface);color:var(--ink)" required></textarea>
+      <button type="submit" class="p" style="margin-top:14px">Create client</button></form>`
+    : "";
+
+  send(res, "Overview", `<div class="head"><div><h1>Overview</h1><p>Who can reach which mailbox, and how.</p></div></div>
+  ${flash(req)}${warn}
+  ${card("clients", "Access map", map + addClient, { aside: `<span class="sub">Blank means no access. ${pill("draft")} ${pill("organize")} change things.${config.registrationMode === "admin" ? "" : " Clients register themselves; registration grants nothing."}</span>` })}
+  ${card("mailboxes", "Mailboxes", mailboxes.length
+    ? `<div class="scroll"><table><thead><tr><th scope="col">Label</th><th scope="col">Server</th><th scope="col">User</th><th scope="col">Drafts folder</th><th scope="col">Clients</th><th></th></tr></thead><tbody>${mbRows}</tbody></table></div>`
+    : `<p class="pad sub">No mailboxes yet.</p>`, { aside: `<a class="btn p s" href="/mailboxes/new">Add mailbox</a>` })}
+  ${card("tokens", "Active tokens", tokens.length
+    ? `<div class="scroll"><table><thead><tr><th scope="col">Client</th><th scope="col">Can reach</th><th scope="col">Issued</th><th scope="col">Access token expires</th><th></th></tr></thead><tbody>${tkRows}</tbody></table></div>`
+    : `<p class="pad sub">No active tokens.</p>`, { aside: `<span class="sub">Revoking cuts access at the next call.</span>` })}`, "overview");
 });
 
 // ---------------- Mailboxes ----------------
 function mailboxForm(req: Request, opts: { action: string; m?: { label: string; imap_host: string; imap_port: number; imap_username: string }; edit: boolean }) {
   const m = opts.m;
-  return `<form method="POST" action="${esc(opts.action)}" autocomplete="off">${csrf(req)}
-    <label>Label</label><input type="text" name="label" maxlength="100" required value="${esc(m?.label ?? "")}">
-    <label>IMAP host</label><input type="text" name="host" maxlength="253" required value="${esc(m?.imap_host ?? "")}">
-    <label>Port (TLS)</label><input type="number" name="port" min="1" max="65535" required value="${m?.imap_port ?? 993}">
-    <label>Username</label><input type="text" name="username" maxlength="320" required value="${esc(m?.imap_username ?? "")}">
-    <label>Password${opts.edit ? " (leave empty to keep the saved password)" : ""}</label>
-    <input type="password" name="password" autocomplete="new-password" ${opts.edit ? "" : "required"}>
-    <button type="submit">${opts.edit ? "Save" : "Add mailbox"}</button></form>`;
+  return `<form method="POST" action="${esc(opts.action)}" autocomplete="off" class="pad">${csrf(req)}
+    <label for="mb-label" style="margin-top:0">Label</label><input id="mb-label" type="text" name="label" maxlength="100" required value="${esc(m?.label ?? "")}" style="max-width:340px">
+    <div class="grid2"><div><label for="mb-host">IMAP host</label><input id="mb-host" type="text" name="host" maxlength="253" required value="${esc(m?.imap_host ?? "")}"></div>
+    <div><label for="mb-port">Port (TLS)</label><input id="mb-port" type="number" name="port" min="1" max="65535" required value="${m?.imap_port ?? 993}"></div></div>
+    <label for="mb-user">Username</label><input id="mb-user" type="text" name="username" maxlength="320" required value="${esc(m?.imap_username ?? "")}">
+    <label for="mb-pass">Password</label>
+    <input id="mb-pass" type="password" name="password" autocomplete="new-password" ${opts.edit ? 'placeholder="Leave empty to keep the saved password"' : "required"}>
+    <div class="hint">Stored encrypted. TLS with certificate validation is always on.</div>
+    <button type="submit" class="p" style="margin-top:18px">${opts.edit ? "Save connection" : "Add mailbox"}</button></form>`;
 }
 
 router.get("/mailboxes/new", (req, res) => {
-  send(res, "Add mailbox", `${flash(req)}<div class="card"><h2>Add mailbox</h2>${mailboxForm(req, { action: "/mailboxes", edit: false })}
-    <p class="small">Connections use TLS with certificate validation. Test the connection after saving.</p></div>`);
+  send(res, "Add mailbox", `<div class="crumb"><a href="/dashboard#mailboxes">Mailboxes</a> / New</div><div class="head"><h1>Add mailbox</h1></div>${flash(req)}
+    ${card("add", "Connection", mailboxForm(req, { action: "/mailboxes", edit: false }))}
+    <p class="small">Test the connection after saving, then choose the Drafts folder.</p>`, "mailboxes");
 });
 
 router.post("/mailboxes", (req, res) => {
@@ -96,22 +132,32 @@ router.post("/mailboxes", (req, res) => {
 
 function renderMailbox(req: Request, res: Response, id: string, test?: { ok: boolean; message: string; folders: string[] }) {
   const m = getMailbox(id);
-  if (!m) return res.status(404).send(layout("Not found", `<div class="card"><h2>Mailbox not found</h2><a href="/dashboard">Back</a></div>`, "admin"));
-  const folderForm = test?.ok
-    ? `<form method="POST" action="/mailboxes/${esc(m.id)}/drafts">${csrf(req)}
-        <label>Drafts folder</label>
-        <select name="drafts_folder">${test.folders.map((f) => `<option value="${esc(f)}"${f === m.drafts_folder ? " selected" : ""}>${esc(f)}</option>`).join("")}</select>
-        <button type="submit">Save Drafts folder</button></form>`
-    : `<p class="small">Run the connection test to choose the Drafts folder from the server's folder list.</p>`;
-  send(res, m.label, `${flash(req)}
-  <div class="card"><h2>${esc(m.label)}</h2>${mailboxForm(req, { action: `/mailboxes/${m.id}`, m, edit: true })}</div>
-  <div class="card"><h2>Connection and Drafts folder</h2>
-    <p>Current Drafts folder: <strong>${m.drafts_folder ? esc(m.drafts_folder) : "not set"}</strong></p>
-    ${test ? `<div class="${test.ok ? "success" : "error"}">${esc(test.message)}</div>` : ""}
-    ${post(req, `/mailboxes/${m.id}/test`, "Test connection")}
-    ${folderForm}</div>
-  <div class="card"><h2>Remove</h2><p class="small">Removes this configuration and all its grants. Mail on the server is not touched.</p>
-    ${post(req, `/mailboxes/${m.id}/delete`, "Delete mailbox", "btn-danger", "Delete this mailbox configuration?")}</div>`);
+  if (!m) return res.status(404).send(layout("Not found", `<div class="card"><div class="pad"><h2>Mailbox not found</h2><a href="/dashboard">Back</a></div></div>`, "admin", "mailboxes"));
+  const rows = capabilityRows(getDb(), { mailboxId: m.id });
+  const byClient = new Map<string, Set<string>>();
+  for (const r of rows) (byClient.get(r.client_id) ?? byClient.set(r.client_id, new Set()).get(r.client_id)!).add(r.capability);
+  const names = new Map((getDb().prepare("SELECT client_id, client_name FROM oauth_clients").all() as any[]).map((c) => [c.client_id, c.client_name || "(unnamed)"]));
+  const reach = byClient.size
+    ? `<table><tbody>${[...byClient].map(([cid, caps]) => `<tr><th scope="row">${esc(names.get(cid) ?? cid)}</th><td>${CAPABILITIES.filter((c) => caps.has(c)).map(pill).join(" ")}</td><td class="r"><a class="btn s" href="/clients/${esc(cid)}">Edit grants</a></td></tr>`).join("")}</tbody></table>`
+    : `<p class="pad sub">No client has access to ${esc(m.label)} yet. Grant it from a client's page.</p>`;
+  const folderForm = `<form method="POST" action="/mailboxes/${esc(m.id)}/drafts" class="pad">${csrf(req)}
+    <p class="sub">Clients with <b>draft</b> write only here. They cannot read, move or send.</p>
+    ${test?.ok
+      ? `<label for="df">Folder on server</label>
+        <select id="df" name="drafts_folder" style="max-width:340px">${m.drafts_folder ? "" : `<option value="">Choose a folder\u2026</option>`}${test.folders.map((f) => `<option value="${esc(f)}"${f === m.drafts_folder ? " selected" : ""}>${esc(f)}</option>`).join("")}</select>
+        <button type="submit" class="p" style="margin-top:14px">Save Drafts folder</button>`
+      : `<p class="hint">Run the connection test to choose the Drafts folder from the server's folder list.</p>`}</form>`;
+  send(res, m.label, `<div class="crumb"><a href="/dashboard#mailboxes">Mailboxes</a> / ${esc(m.label)}</div>
+  <div class="head"><div><h1>${esc(m.label)}</h1><p class="mono">${esc(m.imap_username)} \u00b7 ${esc(m.imap_host)}:${m.imap_port}</p></div>${post(req, `/mailboxes/${m.id}/test`, "Test connection")}</div>
+  ${flash(req)}${test ? `<div class="${test.ok ? "success" : "error"}" role="status"><span>${esc(test.message)}</span></div>` : ""}
+  ${card("conn", "Connection", mailboxForm(req, { action: `/mailboxes/${m.id}`, m, edit: true }))}
+  ${card("drafts", "Drafts folder", folderForm, { aside: m.drafts_folder ? `<span class="sub">Current: <b>${esc(m.drafts_folder)}</b></span>` : `<span class="pill warn">not set</span>` })}
+  ${card("reach", "Who can reach this mailbox", reach)}
+  ${card("delete", "Delete mailbox", `<form method="POST" action="/mailboxes/${esc(m.id)}/delete">${csrf(req)}
+    <p>This removes the connection and ${byClient.size ? `the grants of <b>${byClient.size}</b> client${byClient.size === 1 ? "" : "s"}` : "all grants"} for <b>${esc(m.label)}</b>. Mail on the server is not touched.</p>
+    <label for="cf">Type <b>${esc(m.label)}</b> to confirm</label>
+    <input id="cf" type="text" required autocomplete="off" pattern="${esc(reRaw(m.label))}" title="Type the mailbox label exactly: ${esc(m.label)}" style="max-width:340px">
+    <button type="submit" class="dfill" style="margin-top:14px">Delete mailbox</button></form>`, { cls: "danger-zone", padded: true })}`, "mailboxes");
 }
 
 router.get("/mailboxes/:id", (req, res) => renderMailbox(req, res, req.params.id));
@@ -163,22 +209,60 @@ router.post("/clients", (req, res) => {
 
 router.get("/clients/:id", (req, res) => {
   const db = getDb();
-  const c = db.prepare("SELECT client_id, client_name, redirect_uris, disabled FROM oauth_clients WHERE client_id = ?").get(req.params.id) as any;
-  if (!c) return res.status(404).send(layout("Not found", `<div class="card"><h2>Client not found</h2></div>`, "admin"));
+  const c = db.prepare("SELECT client_id, client_name, redirect_uris, disabled, created_at FROM oauth_clients WHERE client_id = ?").get(req.params.id) as any;
+  if (!c) return res.status(404).send(layout("Not found", `<div class="card"><div class="pad"><h2>Client not found</h2><a href="/dashboard">Back</a></div></div>`, "admin", "clients"));
   const mailboxes = listMailboxes();
-  const granted = new Set((db.prepare("SELECT mailbox_id, capability FROM grants WHERE client_id = ?").all(c.client_id) as any[]).map((g) => `${g.mailbox_id}:${g.capability}`));
+  const labels = new Map(mailboxes.map((m) => [m.id, m.label]));
   let uris: string[] = [];
   try { uris = JSON.parse(c.redirect_uris); } catch { /* ignore */ }
-  const rows = mailboxes.map((m) => `<tr><td>${esc(m.label)}</td>${CAPABILITIES.map((cap) =>
-    `<td><input type="checkbox" name="g_${esc(m.id)}_${cap}" value="1"${granted.has(`${m.id}:${cap}`) ? " checked" : ""} aria-label="${cap} on ${esc(m.label)}"></td>`).join("")}</tr>`).join("");
-  send(res, "Client", `${flash(req)}
-  <div class="card"><h2>${esc(c.client_name || "(unnamed)")}</h2>
-    <p class="small">client_id: ${esc(c.client_id)} &middot; ${c.disabled ? "disabled" : "active"}</p>
-    <p class="small">Redirect URIs: ${uris.map(esc).join(", ")}</p></div>
-  <div class="card"><h2>Grants</h2>
-    <p class="small">Removing a grant applies on the next call, including for existing tokens. Adding a capability the client's tokens were not consented for needs a new authorization.</p>
-    ${mailboxes.length ? `<form method="POST" action="/clients/${esc(c.client_id)}/grants">${csrf(req)}
-      <table><tr><th>Mailbox</th>${CAPABILITIES.map((x) => `<th>${x}</th>`).join("")}</tr>${rows}</table><button type="submit">Save grants</button></form>` : "<p>No mailboxes configured.</p>"}</div>`);
+  const name = c.client_name || "(unnamed)";
+  const rules = listRules(db, c.client_id);
+  const ruleRows = rules.map((r) => `<tr><td>${esc(labels.get(r.mailbox_id) ?? r.mailbox_id)}</td><td class="mono">${esc(r.folder)}${isValidSelector(r.folder) ? "" : " <span class=\"pill warn\">invalid, never matches</span>"}</td><td>${esc(r.operation)}</td><td><b>${esc(r.effect)}</b></td><td class="r">${post(req, `/clients/${encodeURIComponent(c.client_id)}/rules/${encodeURIComponent(r.id)}/delete`, "Remove", "s")}</td></tr>`).join("");
+  const rows = mailboxes.map((m) => `<tr><th scope="row">${esc(m.label)}${m.drafts_folder ? "" : `<div class="sub" style="font-weight:400">No Drafts folder yet</div>`}</th>${CAPABILITIES.map((cap) => {
+    const on = presetActive(db, c.client_id, m.id, cap);
+    const off = cap === "draft" && !m.drafts_folder && !on;
+    return `<td class="c"><input type="checkbox" name="g_${esc(m.id)}_${cap}" value="1"${on ? " checked" : ""}${off ? " disabled" : ""} aria-label="${esc(name)}: ${cap} on ${esc(m.label)}${off ? " (unavailable: no Drafts folder)" : ""}"></td>`;
+  }).join("")}</tr>`).join("");
+  send(res, name, `<div class="crumb"><a href="/dashboard#clients">Clients</a> / ${esc(name)}</div>
+  <div class="head"><div><h1>${esc(name)}</h1><p class="mono">${esc(c.client_id)} \u00b7 registered ${when(c.created_at)} \u00b7 <span class="pill ${c.disabled ? "off" : "ok"}" style="font-family:system-ui">${c.disabled ? "disabled" : "active"}</span></p></div>
+    ${c.disabled ? post(req, `/clients/${encodeURIComponent(c.client_id)}/enable`, "Enable client") : `<a class="btn d" href="/clients/${esc(c.client_id)}/disable">Disable client</a>`}</div>
+  ${flash(req)}
+  ${mailboxes.length ? `<form method="POST" action="/clients/${esc(c.client_id)}/grants">${csrf(req)}${card("grants", "Grants",
+    `<p class="pad sub" style="padding-bottom:0">Removing a grant applies on the next call, even for tokens already issued. Adding a capability the token was not authorized for needs a new authorization.</p>
+    <div class="scroll" style="margin-top:12px"><table><thead><tr><th scope="col">Mailbox</th>${CAPABILITIES.map((x) => `<th scope="col" class="c">${x}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="confirm"><span class="sub">Nothing ticked means no access.</span><button type="submit" class="p s">Save grants</button></div>`)}</form>` : card("grants", "Grants", `<p class="pad sub">No mailboxes configured.</p>`)}
+  ${card("rules", "Advanced rules", `<p class="pad sub" style="padding-bottom:0">Presets above expand to allow rules on all folders (<code>*</code>): read = ${PRESET_OPS.read.join(", ")}; draft = ${PRESET_OPS.draft.join(", ")}; organize = ${PRESET_OPS.organize.join(", ")}. A matching <b>deny</b> always wins; no matching allow means denied. Folder: exact IMAP path (case-sensitive), <code>*</code>, or <code>Prefix/*</code> for sub-folders. Renaming a folder on the server makes an exact rule stop matching (fails closed).</p>
+    ${rules.length ? `<div class="scroll" style="margin-top:12px"><table><thead><tr><th scope="col">Mailbox</th><th scope="col">Folder</th><th scope="col">Operation</th><th scope="col">Effect</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table></div>` : `<p class="pad sub">No rules.</p>`}
+    ${mailboxes.length ? `<form method="POST" action="/clients/${esc(c.client_id)}/rules" class="pad" style="border-top:1px solid var(--line)">${csrf(req)}<h3 style="font-size:14px">Add rule</h3>
+      <label for="rm">Mailbox</label><select id="rm" name="mailbox_id">${mailboxes.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("")}</select>
+      <label for="rf">Folder (exact path, <code>*</code>, or <code>Prefix/*</code>)</label><input id="rf" type="text" name="folder" maxlength="255" required>
+      <label for="ro">Operation</label><select id="ro" name="operation">${OPERATIONS.map((o) => `<option value="${o}">${o} (needs ${OP_CAPABILITY[o]})</option>`).join("")}</select>
+      <label for="re">Effect</label><select id="re" name="effect"><option value="allow">allow</option><option value="deny">deny</option></select>
+      <button type="submit" class="p s">Add rule</button></form>` : ""}`)}
+  ${card("revoke", "Revoke client", `<p>Removes every rule and revokes all tokens. IMAP credentials are not changed.</p>${post(req, `/clients/${encodeURIComponent(c.client_id)}/revoke`, "Revoke client", "dfill")}`, { cls: "danger-zone", padded: true })}
+  ${card("caps", "What each capability allows", `<table><tbody>
+    <tr><td>${pill("read")}</td><td>List folders, search, read messages</td></tr>
+    <tr><td>${pill("draft")}</td><td>Create drafts in the mailbox's Drafts folder only</td></tr>
+    <tr><td>${pill("organize")}</td><td>Move messages and set flags within one mailbox</td></tr></tbody></table>`)}
+  ${card("uris", "Redirect URIs", `<p class="mono">${uris.map(esc).join("<br>")}</p>`, { padded: true })}`, "clients");
+});
+
+// Confirmation pages (no JS available under the CSP): state the impact, then POST to the real endpoint.
+router.get("/clients/:id/disable", (req, res) => {
+  const c = getDb().prepare("SELECT client_id, client_name FROM oauth_clients WHERE client_id = ?").get(req.params.id) as any;
+  if (!c) return res.status(404).send("Not found");
+  const n = (getDb().prepare("SELECT COUNT(*) AS n FROM oauth_tokens WHERE client_id = ? AND revoked = 0").get(c.client_id) as any).n as number;
+  send(res, "Disable client", `<div class="crumb"><a href="/clients/${esc(c.client_id)}">${esc(c.client_name || "(unnamed)")}</a> / Disable</div><div class="head"><h1>Disable ${esc(c.client_name || "(unnamed)")}?</h1></div>
+  ${card("confirm", "This takes effect immediately", `<p>${n} active token${n === 1 ? "" : "s"} will be revoked and the client cannot authorize again until you enable it. Grants are kept.</p>
+    <div class="row" style="margin-top:16px"><form method="POST" action="/clients/${esc(c.client_id)}/disable">${csrf(req)}<button type="submit" class="dfill">Disable client</button></form><a class="btn" href="/clients/${esc(c.client_id)}">Cancel</a></div>`, { cls: "danger-zone", padded: true })}`, "clients");
+});
+
+router.get("/tokens/:id/revoke", (req, res) => {
+  const t = getDb().prepare("SELECT t.id, t.client_id, t.scopes, c.client_name FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id WHERE t.id = ?").get(req.params.id) as any;
+  if (!t) return res.status(404).send("Not found");
+  send(res, "Revoke token", `<div class="crumb"><a href="/dashboard#tokens">Tokens</a> / Revoke</div><div class="head"><h1>Revoke ${esc(t.client_name || t.client_id)}'s token?</h1></div>
+  ${card("confirm", "This takes effect immediately", `<p>The client loses access with this token (${scopesToCaps(t.scopes).map(pill).join(" ")}) on its next call. It can ask you to authorize again.</p>
+    <div class="row" style="margin-top:16px"><form method="POST" action="/tokens/${encodeURIComponent(t.id)}/revoke">${csrf(req)}<button type="submit" class="dfill">Revoke token</button></form><a class="btn" href="/dashboard#tokens">Cancel</a></div>`, { cls: "danger-zone", padded: true })}`, "tokens");
 });
 
 router.post("/clients/:id/grants", (req, res) => {
@@ -187,11 +271,46 @@ router.post("/clients/:id/grants", (req, res) => {
   if (!c) return res.status(404).send("Not found");
   const mailboxes = listMailboxes();
   db.transaction(() => {
-    db.prepare("DELETE FROM grants WHERE client_id = ?").run(req.params.id);
-    const ins = db.prepare("INSERT INTO grants (client_id, mailbox_id, capability) VALUES (?, ?, ?)");
-    for (const m of mailboxes) for (const cap of CAPABILITIES as Capability[]) if (req.body[`g_${m.id}_${cap}`]) ins.run(req.params.id, m.id, cap);
+    for (const m of mailboxes) for (const cap of CAPABILITIES as Capability[]) {
+      const want = !!req.body[`g_${m.id}_${cap}`];
+      const have = presetActive(db, req.params.id, m.id, cap);
+      if (want && !have) grantPreset(db, req.params.id, m.id, cap);
+      else if (!want && have) revokePreset(db, req.params.id, m.id, cap);
+    }
   })();
-  back(res, `/clients/${encodeURIComponent(req.params.id)}`, "msg", "Grants saved.");
+  back(res, `/clients/${encodeURIComponent(req.params.id)}`, "msg", "Presets saved.");
+});
+
+router.post("/clients/:id/rules", (req, res) => {
+  const db = getDb();
+  const id = req.params.id;
+  const path = `/clients/${encodeURIComponent(id)}`;
+  if (!db.prepare("SELECT 1 FROM oauth_clients WHERE client_id = ?").get(id)) return res.status(404).send("Not found");
+  const mailboxId = str(req.body.mailbox_id, 100);
+  const folder = typeof req.body.folder === "string" ? req.body.folder.trim() : "";
+  const op = req.body.operation;
+  const effect = req.body.effect;
+  if (!getMailbox(mailboxId)) return back(res, path, "err", "Unknown mailbox");
+  if (!isValidSelector(folder)) return back(res, path, "err", "Invalid folder selector: use an exact path, *, or Prefix/* (no other wildcards)");
+  if (!isOperation(op)) return back(res, path, "err", "Unknown operation");
+  if (effect !== "allow" && effect !== "deny") return back(res, path, "err", "Effect must be allow or deny");
+  setRule(db, id, mailboxId, folder, op, effect);
+  back(res, path, "msg", "Rule saved.");
+});
+
+router.post("/clients/:id/rules/:ruleId/delete", (req, res) => {
+  getDb().prepare("DELETE FROM policy_rules WHERE id = ? AND client_id = ?").run(req.params.ruleId, req.params.id);
+  back(res, `/clients/${encodeURIComponent(req.params.id)}`, "msg", "Rule removed.");
+});
+
+router.post("/clients/:id/revoke", (req, res) => {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM oauth_clients WHERE client_id = ?").get(req.params.id)) return res.status(404).send("Not found");
+  db.transaction(() => {
+    db.prepare("DELETE FROM policy_rules WHERE client_id = ?").run(req.params.id);
+    db.prepare("UPDATE oauth_tokens SET revoked = 1 WHERE client_id = ?").run(req.params.id);
+  })();
+  back(res, `/clients/${encodeURIComponent(req.params.id)}`, "msg", "All rules removed and tokens revoked. IMAP credentials are unchanged.");
 });
 
 for (const [action, val] of [["disable", 1], ["enable", 0]] as const) {

@@ -37,26 +37,26 @@ export function createMcpServer(ctx: TokenContext): McpServer {
   }, wrap(false, (c) => listMailboxesTool(c)));
 
   server.registerTool("list_folders", {
-    description: "List folders of a mailbox (requires read).",
+    description: "List the folders of a mailbox that you may read (search/read headers/read body allowed).",
     inputSchema: { mailbox: mailboxId },
   }, wrap(false, listFoldersTool));
 
   server.registerTool("search_messages", {
-    description: `Search a folder; returns headers only, newest first, max ${MAX_PAGE} per page. Pass nextCursor as cursor for the next page. Does not change read state.`,
+    description: `Search one folder, or all folders you may search when folder is omitted; returns headers only, newest first, max ${MAX_PAGE} per page. Pass nextCursor as cursor for the next page. Does not change read state.`,
     inputSchema: {
-      mailbox: mailboxId, folder: folder.default("INBOX"),
+      mailbox: mailboxId, folder: folder.optional().describe("Omit to search every folder you are allowed to search"),
       text: z.string().max(200).optional(), from: z.string().max(200).optional(),
       to: z.string().max(200).optional(), subject: z.string().max(200).optional(),
       since: z.string().optional().describe("YYYY-MM-DD"), before: z.string().optional().describe("YYYY-MM-DD"),
       unseen: z.boolean().optional(), flagged: z.boolean().optional(),
       limit: z.number().int().min(1).max(MAX_PAGE).optional(),
-      cursor: z.number().int().positive().optional(),
+      cursor: z.union([z.number().int().positive(), z.string().min(1).max(4096)]).optional(),
     },
   }, wrap(false, searchMessagesTool));
 
   server.registerTool("read_message", {
-    description: "Read headers and text body (capped at 200 KB, flag truncated) of one message. Does not set \\Seen.",
-    inputSchema: { ref },
+    description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. Does not set \\Seen.",
+    inputSchema: { ref, include: z.array(z.enum(["headers", "body"])).min(1).max(2).optional().describe('Default: both') },
   }, wrap(false, readMessageTool));
 
   server.registerTool("create_draft", {

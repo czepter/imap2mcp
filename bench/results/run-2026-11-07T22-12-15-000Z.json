@@ -1,0 +1,117 @@
+{
+  "date": "2026-11-07T22:12:15.000Z",
+  "N": 10000,
+  "RTT": 20,
+  "USE_DOCKER": true,
+  "FULL_FIXTURE": true,
+  "gates": [
+    {
+      "id": "G1",
+      "name": "Cold UID/header sync",
+      "limit": "<= 30 s",
+      "measured": "1893 ms wall (sidecar reports 1891 ms), 10000 messages, 10000 fetched, 10000 envelope FETCHes at the server",
+      "pass": true
+    },
+    {
+      "id": "G2",
+      "name": "Warm list (100 newest), 100 calls, concurrency 5, <=100 results",
+      "limit": "p95 <= 300 ms",
+      "measured": "p50 4.2 / p95 7.0 / p99 1026.7 / max 1026.8 ms (1111 ms wall)",
+      "pass": true
+    },
+    {
+      "id": "G2",
+      "name": "Warm search subject, 100 calls, concurrency 5, <=100 results",
+      "limit": "p95 <= 300 ms",
+      "measured": "p50 5.2 / p95 10.1 / p99 11.5 / max 11.6 ms (115 ms wall)",
+      "pass": true
+    },
+    {
+      "id": "G2",
+      "name": "Warm search from + unseen, 100 calls, concurrency 5, <=100 results",
+      "limit": "p95 <= 300 ms",
+      "measured": "p50 4.3 / p95 7.4 / p99 9.1 / max 10.4 ms (100 ms wall)",
+      "pass": true
+    },
+    {
+      "id": "G3",
+      "name": "100 new messages searchable after sync start",
+      "limit": "<= 5 s",
+      "measured": "71 ms (found 100/100; sync reported fetched=100)",
+      "pass": true
+    },
+    {
+      "id": "G3b",
+      "name": "Unchanged messages not refetched during incremental sync",
+      "limit": "0 refetched (1 tolerated: `UID FETCH n:*` always returns the highest UID, RFC 3501)",
+      "measured": "0 of 10000 old UIDs got an envelope FETCH (max 0); new UIDs fetched 100x",
+      "pass": true
+    },
+    {
+      "id": "G4a",
+      "name": "Flag reconciliation: 500 flag changes by another client, no other change (SYNC_RECONCILE_SECS=30)",
+      "limit": "<= 60 s",
+      "measured": "visible after 30305 ms",
+      "pass": true
+    },
+    {
+      "id": "G4b",
+      "name": "Expunge reconciliation: 200 messages expunged by another client, no other change",
+      "limit": "<= 60 s",
+      "measured": "count correct after 31714 ms; expunged UIDs still returned by search: 0",
+      "pass": true
+    },
+    {
+      "id": "G4c",
+      "name": "Explicit full reconcile (`sync mode=full`, UID SEARCH ALL + FLAGS) on 10k folder",
+      "limit": "informational",
+      "measured": "1642 ms (flagChanges=46, expunged=0)",
+      "pass": null
+    },
+    {
+      "id": "G5",
+      "name": "UIDVALIDITY reset rebuild",
+      "limit": "<= 30 s (cold budget), no stale mappings",
+      "measured": "2799 ms, reset=true, count=10000, stale-uidValidity fetchHeaders -> error -32010, new-only list=true, old rows left=0",
+      "pass": true
+    },
+    {
+      "id": "G6",
+      "name": "Sidecar RSS (ping.rssBytes, max of after-warm and after-reset with 2 x 10k headers built)",
+      "limit": "< 256 MB",
+      "measured": "91.3 MiB (after warm queries 91.3, final 70.8)",
+      "pass": true
+    },
+    {
+      "id": "G6b",
+      "name": "Container memory peak (docker stats, 2 s sampling)",
+      "limit": "informational (< 2 GiB cgroup limit)",
+      "measured": "92.6 MiB",
+      "pass": null
+    },
+    {
+      "id": "B1",
+      "name": "Body transfer fetchBody (~50 KB bodies), sequential x50",
+      "limit": "measured separately, no gate",
+      "measured": "p50 41.6 / p95 43.3 ms",
+      "pass": null
+    },
+    {
+      "id": "B2",
+      "name": "Body transfer fetchBody, 100 calls concurrency 5",
+      "limit": "no gate",
+      "measured": "p50 41.8 / p95 109.1 ms",
+      "pass": null
+    },
+    {
+      "id": "B3",
+      "name": "Remote body search searchText over 10000 messages (IMAP UID SEARCH TEXT; time is dominated by the fake server scanning), sequential x5",
+      "limit": "no gate",
+      "measured": "p50 354 / max 1350 ms",
+      "pass": null
+    }
+  ],
+  "extra": [
+    "Average header as returned by `list` (JSON): 2612 bytes (target fixture: about 2 KB)."
+  ]
+}

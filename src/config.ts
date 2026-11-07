@@ -12,6 +12,10 @@ export interface Config {
   registrationMode: "dynamic" | "admin";
   allowPrivateHosts: string[];
   adminBootstrapToken: string | undefined;
+  /** Path of the sidecar binary (SIDECAR_BIN). */
+  sidecarBin: string;
+  /** SIDECAR_DISABLED=1: use the v0 direct IMAP read path (debugging only; off by default). */
+  sidecarDisabled: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -54,6 +58,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     registrationMode: mode as "dynamic" | "admin",
     allowPrivateHosts: (env.ALLOW_PRIVATE_HOSTS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
     adminBootstrapToken: env.ADMIN_BOOTSTRAP_TOKEN?.trim() || undefined,
+    sidecarBin: resolve(env.SIDECAR_BIN?.trim() || "sidecar/bin/sidecar"),
+    sidecarDisabled: ["1", "true", "yes"].includes((env.SIDECAR_DISABLED || "").trim().toLowerCase()),
   };
 }
 

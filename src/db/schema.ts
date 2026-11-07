@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { sqliteTable, text, integer, primaryKey, check } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, check, unique, index } from "drizzle-orm/sqlite-core";
 
 const now = sql`(datetime('now'))`;
 
@@ -32,17 +32,25 @@ export const oauthClients = sqliteTable("oauth_clients", {
   disabled: integer("disabled").notNull().default(0),
 });
 
-export const grants = sqliteTable(
-  "grants",
+export const POLICY_OPERATIONS = ["search", "read_headers", "read_body", "draft", "move", "flag"] as const;
+
+export const policyRules = sqliteTable(
+  "policy_rules",
   {
+    id: text("id").primaryKey(),
     clientId: text("client_id").notNull().references(() => oauthClients.clientId, { onDelete: "cascade" }),
     mailboxId: text("mailbox_id").notNull().references(() => mailboxes.id, { onDelete: "cascade" }),
-    capability: text("capability").notNull(),
+    // exact IMAP path, or '*' / 'prefix/*' (case-sensitive; no other wildcards)
+    folder: text("folder").notNull(),
+    operation: text("operation").notNull(),
+    effect: text("effect").notNull(),
     createdAt: text("created_at").notNull().default(now),
   },
   (t) => [
-    primaryKey({ columns: [t.clientId, t.mailboxId, t.capability] }),
-    check("grants_capability", sql`${t.capability} IN ('read','draft','organize')`),
+    unique("policy_rules_unique").on(t.clientId, t.mailboxId, t.folder, t.operation),
+    index("policy_rules_client_mailbox").on(t.clientId, t.mailboxId),
+    check("policy_rules_operation", sql`${t.operation} IN ('search','read_headers','read_body','draft','move','flag')`),
+    check("policy_rules_effect", sql`${t.effect} IN ('allow','deny')`),
   ]
 );
 

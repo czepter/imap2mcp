@@ -27,6 +27,14 @@ export interface FakeAccount {
   pass: string;
   folders: Map<string, FakeFolder>;
 }
+export interface FetchStat {
+  /** FETCHes that asked for ENVELOPE (a "header fetch") */
+  envelope: number;
+  /** FETCHes that asked for flags only (reconciliation) */
+  flags: number;
+  /** FETCHes that returned any body section */
+  body: number;
+}
 export interface LoggedCommand {
   user: string | null;
   selected: string | null;
@@ -38,6 +46,11 @@ type Tok = string | Buffer | Tok[];
 export class FakeImapServer {
   accounts = new Map<string, FakeAccount>();
   commands: LoggedCommand[] = [];
+  /** Per (user, folder, uid) counters of what was FETCHed; makes "unchanged messages are not refetched" assertable. */
+  fetchStats = new Map<string, Map<number, FetchStat>>();
+  /** Artificial one-way-ish delay: every response batch is held back this long (== injected RTT per round trip). */
+  latencyMs = 0;
+  private holds: Array<{ pred: (line: string, user: string | null, selected: string | null) => boolean; arrived: () => void; released: Promise<void> }> = [];
   private server!: tls.Server;
   private sockets = new Set<import("node:net").Socket>();
   port = 0;
@@ -100,6 +113,100 @@ export class FakeImapServer {
   clearLog(): void {
     this.commands = [];
   }
+
+  // ---------------------------------------------------------------- v1 helpers (large mailboxes, external changes, hooks)
+  /**
+   * Adds `count` messages whose raw bytes are generated on demand (nothing is kept in memory per message besides the
+   * small descriptor), with ~`headerBytes` of envelope data (long To/Cc lists). Returns the uid range.
+   */
+  addGenerated(user: string, folder: string, count: number, opts: { headerBytes?: number; subject?: (i: number) => string; flags?: (i: number) => string[]; bodyBytes?: number } = {}): { first: number; last: number } {
+    const f = this.folder(user, folder);
+    const first = f.uidNext;
+    const headerBytes = opts.headerBytes ?? 2048;
+    const bodyBytes = opts.bodyBytes ?? 200;
+    for (let i = 0; i < count; i++) {
+      const uid = f.uidNext++;
+      const subject = opts.subject ? opts.subject(i) : `Generated message ${uid}`;
+      const m = { uid, flags: new Set(opts.flags ? opts.flags(i) : []), date: new Date(Date.UTC(2025, 0, 1) + uid * 60_000) } as FakeMessage;
+      Object.defineProperty(m, "raw", { enumerable: true, get: () => genRaw(uid, subject, headerBytes, bodyBytes) });
+      f.messages.push(m);
+    }
+    return { first, last: f.uidNext - 1 };
+  }
+  addFolder(user: string, name: string, special?: string): FakeFolder {
+    const acct = this.accounts.get(user)!;
+    const f: FakeFolder = { name, uidValidity: 2000 + acct.folders.size, uidNext: 1, messages: [], special };
+    acct.folders.set(name, f);
+    return f;
+  }
+  /** Folder deleted and re-created: new UIDVALIDITY, UIDs restart at 1 (so old UIDs would silently alias new mail if trusted). */
+  recreateFolder(user: string, name: string): FakeFolder {
+    const f = this.folder(user, name);
+    f.uidValidity += 7777;
+    f.uidNext = 1;
+    f.messages = [];
+    return f;
+  }
+  /** Another client expunges these UIDs behind the bridge's back. */
+  externalExpunge(user: string, name: string, uids: number[]): void {
+    const f = this.folder(user, name);
+    const gone = new Set(uids);
+    f.messages = f.messages.filter((m) => !gone.has(m.uid));
+  }
+  /** Another client changes flags behind the bridge's back. */
+  externalSetFlags(user: string, name: string, uid: number, add: string[] = [], remove: string[] = []): void {
+    const m = this.folder(user, name).messages.find((x) => x.uid === uid);
+    if (!m) throw new Error(`no uid ${uid}`);
+    add.forEach((x) => m.flags.add(x));
+    remove.forEach((x) => m.flags.delete(x));
+  }
+  /** Another client delivers mail (UIDNEXT advances). */
+  externalDeliver(user: string, name: string, count: number, subject: (i: number) => string = (i) => `Fresh arrival ${i}`) {
+    return this.addGenerated(user, name, count, { subject });
+  }
+  private statKey(user: string | null, folder: string) {
+    return `${user}\u0000${folder}`;
+  }
+  fetchStat(user: string, folder: string, uid: number): FetchStat {
+    return this.fetchStats.get(this.statKey(user, folder))?.get(uid) ?? { envelope: 0, flags: 0, body: 0 };
+  }
+  /** Total FETCH counts of a kind for a folder, optionally restricted to a uid range. */
+  fetchTotal(user: string, folder: string, kind: keyof FetchStat, range?: [number, number]): number {
+    let n = 0;
+    for (const [uid, st] of this.fetchStats.get(this.statKey(user, folder)) ?? []) if (!range || (uid >= range[0] && uid <= range[1])) n += st[kind];
+    return n;
+  }
+  resetFetchStats(): void {
+    this.fetchStats.clear();
+  }
+  private recordFetch(user: string | null, folder: string, uid: number, items: string[]) {
+    const k = this.statKey(user, folder);
+    let per = this.fetchStats.get(k);
+    if (!per) this.fetchStats.set(k, (per = new Map()));
+    let st = per.get(uid);
+    if (!st) per.set(uid, (st = { envelope: 0, flags: 0, body: 0 }));
+    const up = items.map((x) => x.toUpperCase());
+    const hasBody = up.some((x) => x.startsWith("BODY[") || x.startsWith("BODY.PEEK[") || x === "RFC822" || x === "RFC822.TEXT");
+    if (hasBody) st.body++;
+    if (up.includes("ENVELOPE")) st.envelope++;
+    else if (!hasBody) st.flags++;
+  }
+  /**
+   * Holds back the next command (on any connection) matching `pred` until `release()` is called. `arrived` resolves when
+   * the command has been received, so a test can change state (e.g. revoke a policy) while a write is "in flight".
+   */
+  holdNext(pred: (line: string, user: string | null, selected: string | null) => boolean): { arrived: Promise<void>; release(): void } {
+    let arrive!: () => void;
+    let rel!: () => void;
+    const arrived = new Promise<void>((r) => (arrive = r));
+    const released = new Promise<void>((r) => (rel = r));
+    this.holds.push({ pred, arrived: arrive, released });
+    return { arrived, release: rel };
+  }
+  /** Number of logged commands for `user` matching `re`. */
+  countCommands(user: string, re: RegExp): number {
+    return this.commands.filter((c) => c.user === user && re.test(c.line)).length;
+  }
   commandsFor(user: string): string[] {
     return this.commands.filter((c) => c.user === user).map((c) => c.line);
   }
@@ -114,7 +221,21 @@ export class FakeImapServer {
     let pending: { parts: Buffer[]; need: number; lineSoFar: string; tag: string } | null = null;
     let authTag: string | null = null;
 
-    const write = (s: string | Buffer) => sock.write(s);
+    let outQ: Array<string | Buffer> = [];
+    let outTimer: NodeJS.Timeout | null = null;
+    const write = (s: string | Buffer) => {
+      if (this.latencyMs <= 0) return sock.write(s);
+      // everything produced within one tick is flushed together after the injected delay (== one RTT per round trip)
+      outQ.push(s);
+      if (!outTimer)
+        outTimer = setTimeout(() => {
+          const q = outQ;
+          outQ = [];
+          outTimer = null;
+          if (!sock.destroyed) sock.write(Buffer.concat(q.map((x) => (typeof x === "string" ? Buffer.from(x) : x))));
+        }, this.latencyMs);
+      return true;
+    };
     write(`* OK [CAPABILITY ${this.caps()}] fake imap ready\r\n`);
 
     const pump = () => {
@@ -187,6 +308,18 @@ export class FakeImapServer {
   }
 
   private handle(tag: string, line: string, literals: Buffer[], st: any, write: (s: string | Buffer) => void, sock: tls.TLSSocket) {
+    const rest0 = line.slice(tag.length + 1);
+    const hi = this.holds.findIndex((h) => h.pred(rest0, st.user, st.sel?.name ?? null));
+    if (hi >= 0) {
+      const [h] = this.holds.splice(hi, 1);
+      h.arrived();
+      void h.released.then(() => this.handleNow(tag, line, literals, st, write, sock));
+      return;
+    }
+    this.handleNow(tag, line, literals, st, write, sock);
+  }
+
+  private handleNow(tag: string, line: string, literals: Buffer[], st: any, write: (s: string | Buffer) => void, sock: tls.TLSSocket) {
     // tokenise (literals get substituted in order)
     const rest = line.slice(tag.length + 1);
     const logLine = /^(LOGIN|AUTHENTICATE)/i.test(rest) ? rest.split(" ")[0] + " ***" : rest.replace(/\{\d+\+?\}/g, "{literal}");
@@ -324,7 +457,11 @@ export class FakeImapServer {
         else if (macro === "FULL") items = ["FLAGS", "INTERNALDATE", "RFC822.SIZE", "ENVELOPE", "BODY"];
         const list = (Array.isArray(items) ? items : [items]).map(String);
         if (isUid && !list.some((x) => x.toUpperCase() === "UID")) list.unshift("UID");
-        for (const m of msgs) this.emitFetch(m, seq(m), list, write);
+        const seqOf = msgs.length > 64 ? new Map(sel.messages.map((x, i) => [x, i + 1] as const)) : null;
+        for (const m of msgs) {
+          this.recordFetch(st.user, sel.name, m.uid, list);
+          this.emitFetch(m, seqOf ? seqOf.get(m)! : seq(m), list, write);
+        }
         return ok();
       }
       case "STORE": {
@@ -458,6 +595,22 @@ export class FakeImapServer {
 }
 
 // ------------------------------------------------------------------ helpers
+function genRaw(uid: number, subject: string, headerBytes: number, bodyBytes: number): Buffer {
+  const rcpt: string[] = [];
+  let n = 0;
+  while (rcpt.join(", ").length < Math.max(0, headerBytes - 400)) {
+    rcpt.push(`Recipient Number${n} <rcpt${uid}-${n}@bulk.example.org>`);
+    n++;
+  }
+  const half = Math.ceil(rcpt.length / 2);
+  const h =
+    `From: Sender ${uid % 97} <sender${uid % 97}@example.org>\r\n` +
+    `To: ${rcpt.slice(0, half).join(", ")}\r\n` +
+    (rcpt.length > half ? `Cc: ${rcpt.slice(half).join(", ")}\r\n` : "") +
+    `Subject: ${subject}\r\nDate: Fri, 02 Jan 2026 03:04:05 +0000\r\nMessage-ID: <gen-${uid}@gen.example.org>\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n\r\n`;
+  return Buffer.from(h + "gen-body-" + uid + " " + "x".repeat(Math.max(0, bodyBytes)) + "\r\n");
+}
 function fmtDate(d: Date): string {
   const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
   const p = (n: number) => String(n).padStart(2, "0");

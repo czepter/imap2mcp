@@ -24,6 +24,8 @@ import tokenRouter from "./oauth/token.js";
 import { bearerAuth } from "./oauth/middleware.js";
 import webRouter from "./web/routes.js";
 import { handleMcpRequest } from "./mcp/server.js";
+import { startSidecar, stopSidecar } from "./sidecar/index.js";
+import { closeAllImap } from "./imap/client.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -66,8 +68,22 @@ app.use(webRouter);
 // MCP: stateless streamable HTTP; a fresh server per request carries the validated token context.
 app.all("/mcp", bearerAuth as any, handleMcpRequest as any);
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`IMAP Bridge running at ${config.baseUrl}`);
   console.log(`MCP endpoint: ${config.baseUrl}/mcp`);
   console.log(`OAuth metadata: ${config.baseUrl}/.well-known/oauth-authorization-server`);
 });
+
+// Read-only IMAP work runs in the supervised sidecar (v1); start it without blocking the listener.
+void startSidecar();
+
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  server.close();
+  await Promise.allSettled([stopSidecar(), closeAllImap()]);
+  process.exit(0);
+}
+process.on("SIGTERM", () => void shutdown());
+process.on("SIGINT", () => void shutdown());

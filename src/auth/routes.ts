@@ -5,6 +5,7 @@ import { hashPassword, verifyPassword } from "./password.js";
 import { adminExists, safeReturnTo } from "./admin.js";
 import { csrfField, createRateLimiter } from "../security/index.js";
 import { config } from "../config.js";
+import { shell, logo } from "../web/views/layout.js";
 
 const router = Router();
 const MIN_PASSWORD = 12;
@@ -27,14 +28,10 @@ function esc(s: string): string {
 }
 
 function page(title: string, body: string): string {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} - IMAP Bridge</title>
-<style>body{font-family:system-ui,sans-serif;background:#f5f5f5;color:#333;margin:0}.c{max-width:420px;margin:60px auto;background:#fff;padding:24px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-label{display:block;margin-top:12px;font-weight:500}input{width:100%;box-sizing:border-box;padding:8px;border:1px solid #ccc;border-radius:6px}
-button{margin-top:16px;background:#2563eb;color:#fff;border:0;padding:10px 20px;border-radius:6px;cursor:pointer}.e{color:#b91c1c;background:#fef2f2;padding:8px;border-radius:6px}</style></head>
-<body><div class="c"><h2>${esc(title)}</h2>${body}</div></body></html>`;
+  return shell(title, `<main class="center"><div class="panel"><div class="brand">${logo("var(--brand)", "var(--brand-ink)")}IMAP Bridge</div><h1>${esc(title)}</h1><div style="margin-top:6px">${body}</div></div></main>`);
 }
 
-const err = (m?: string) => (m ? `<div class="e">${esc(m)}</div>` : "");
+const err = (m?: string) => (m ? `<div class="error" role="alert" style="margin-top:14px">${esc(m)}</div>` : "");
 
 const loginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10, message: "Too many attempts, try again later" });
 const setupLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10, message: "Too many attempts, try again later" });
@@ -54,10 +51,10 @@ function setupForm(req: Request, error?: string): string {
   return page(
     "Initial setup",
     `${err(error)}<form method="POST" action="/setup">${csrfField(req)}
-<label>Bootstrap token (printed in the server log)</label><input type="password" name="token" required autocomplete="off">
-<label>Admin password (min ${MIN_PASSWORD} chars)</label><input type="password" name="password" required minlength="${MIN_PASSWORD}" autocomplete="new-password">
-<label>Repeat password</label><input type="password" name="password2" required minlength="${MIN_PASSWORD}" autocomplete="new-password">
-<button type="submit">Create admin</button></form>`
+<label for="t">Bootstrap token (printed in the server log)</label><input id="t" type="password" name="token" required autocomplete="off">
+<label for="p1">Admin password (min ${MIN_PASSWORD} chars)</label><input id="p1" type="password" name="password" required minlength="${MIN_PASSWORD}" autocomplete="new-password">
+<label for="p2">Repeat password</label><input id="p2" type="password" name="password2" required minlength="${MIN_PASSWORD}" autocomplete="new-password">
+<button type="submit" class="p" style="width:100%;margin-top:20px">Create admin</button></form>`
   );
 }
 
@@ -90,9 +87,9 @@ router.post("/setup", setupLimiter, async (req: Request, res: Response) => {
 router.get("/login", (req, res) => {
   if (!adminExists()) return res.redirect("/setup");
   res.send(
-    page("Admin login", `${err(req.query.error ? "Invalid password" : undefined)}<form method="POST" action="/login">${csrfField(req)}
-<label>Password</label><input type="password" name="password" required autofocus autocomplete="current-password">
-<button type="submit">Login</button></form>`)
+    page("Admin sign-in", `${err(req.query.error ? "Wrong password. Try again." : undefined)}<form method="POST" action="/login">${csrfField(req)}
+<label for="pw">Password</label><input id="pw" type="password" name="password" required autofocus autocomplete="current-password">
+<button type="submit" class="p" style="width:100%;margin-top:20px">Sign in</button></form>`)
   );
 });
 
@@ -111,7 +108,7 @@ router.post("/login", loginLimiter, async (req: Request, res: Response) => {
 });
 
 router.get("/logout", (req, res) => {
-  res.send(page("Logout", `<form method="POST" action="/logout">${csrfField(req)}<button type="submit">Log out</button></form>`));
+  res.send(page("Logout", `<form method="POST" action="/logout">${csrfField(req)}<button type="submit" class="p">Log out</button></form>`));
 });
 
 router.post("/logout", (req, res) => {

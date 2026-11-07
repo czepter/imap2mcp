@@ -156,7 +156,7 @@ describe.skipIf(!haveOpenssl)("policy: default deny and the client x mailbox x c
       const r = await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/delete`, {});
       expect(r.status).toBe(302);
       expect((await c.call("list_folders", { mailbox: id })).data.code).toBe("FORBIDDEN");
-      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM grants WHERE mailbox_id = ?").get(id)).toEqual({ n: 0 });
+      expect(s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules WHERE mailbox_id = ?").get(id)).toEqual({ n: 0 });
       await c.close();
     });
   });

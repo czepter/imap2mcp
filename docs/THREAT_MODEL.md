@@ -1,6 +1,6 @@
-# Threat model (Version 0)
+# Threat model (Version 0, updated for Version 1)
 
-Scope: the single-owner imap2mcp server as specified in `DESIGN_V0.md`. Each claim below is tied to the test that exercises it (`test/integration/*`, `test/unit/*`); anything without a test is marked **untested**.
+Scope: the single-owner imap2mcp server as specified in `DESIGN_V0.md`, plus the v1 changes in `DESIGN_V1.md` (folder x operation policy, Go sidecar). The v1 section follows the v0 tables; where v1 supersedes a v0 statement it says so. Each claim below is tied to the test that exercises it (`test/integration/*`, `test/unit/*`); anything without a test is marked **untested**.
 
 ## Assets
 
@@ -60,8 +60,61 @@ Tool results are returned as data; the server never interprets mail content.
 - Bearer tokens are not sender-constrained (no DPoP/mTLS); a stolen live token works until it expires or is revoked.
 - Rate limiters are per process and in memory; they reset on restart and are keyed by client IP (behind a proxy, configure it to pass the real IP).
 - No audit log in v0 (planned for v2). Recent activity is visible only in the IMAP server's own logs.
-- Coarse grants: no per-folder or per-operation rules; `organize` includes moving to any existing folder of the mailbox (v1).
+- ~~Coarse grants~~ (superseded in v1: rules are per folder and operation, see below).
 - Single owner. Anyone with the admin password is the owner. There is no second factor.
 - Bootstrap token is printed to stdout once on first run; whoever can read the logs before setup can complete setup. Complete setup immediately or set `ADMIN_BOOTSTRAP_TOKEN` yourself.
 - Behavior was tested against a purpose-built IMAP fixture, not against Gmail, Fastmail, Dovecot or Exchange. Provider quirks (folder names, MOVE/UIDPLUS support, UIDVALIDITY handling) are **untested**.
 - Denial of service (large mailboxes, slow servers) is only bounded by page size 50, batch 25, body cap 200 KB and a 30 s operation timeout.
+
+---
+
+# Version 1 additions
+
+## New assets and components
+
+5. The sidecar process: it holds mailbox credentials (in memory only) and a cache of message headers.
+6. The sidecar channel: the Unix domain socket `DATA_DIR/sidecar.sock`.
+7. The policy rule table `policy_rules` (folder x operation x allow/deny per client and mailbox).
+
+## Policy authority (who decides)
+
+The Node policy engine decides everything. The sidecar knows nothing about clients, grants or rules and only ever answers requests that reached it through Node. Node authorizes `(client, mailbox, folder, operation)` before every sidecar call and filters results after it. Rules are read live from SQLite on every call (no policy cache), which is what makes revocation immediate and lets writes be re-authorized right before they run.
+
+Evaluation: the token's scopes must cover the operation's capability; then any matching deny wins, otherwise any matching allow, otherwise deny. Selectors are an exact folder path, `*`, or `prefix/*`; they are case-sensitive and anything else never matches (fails closed). A move needs `move` on the source **and** the destination folder.
+
+| Threat | Mitigation | Evidence |
+|---|---|---|
+| Denied folder leaks through search (hits, counts, snippets, timing of contact) | Folder-less search expands only to folders where `search` and `read_headers` are allowed; denied folders are never contacted (no IMAP command on them is observed) and never counted in `total`; body-text search runs only against allowed folders | `v1-policy.test.ts` "denied search-result leakage" (asserts the fake server saw no command touching the denied folder) |
+| Error text reveals that a denied folder exists | A denied folder and a non-existent folder give the same code and the same message (modulo the name echoed back) | `v1-policy.test.ts` ("indistinguishable from a folder that does not exist") |
+| Body readable although only headers were granted | `read_message` needs `read_headers` for the header part and `read_body` for the body; with body denied no body text is returned | `v1-policy.test.ts` ("headers but no body") |
+| Cache serves data after rights were reduced | The cache lives behind Node's check: every request is authorized first, so a warm cache grants nothing by itself. Tightening a rule applies to the very next call for search, list and read, including references obtained earlier | `v1-policy.test.ts` "cached data is not served after a policy change" |
+| Move used to smuggle mail into a folder the client may not touch, or out of one it may not touch | `move` is required on both folders; an explicit deny on either side wins over wildcard allows; `flag` does not imply `move` | `v1-policy.test.ts` "cross-folder move needs both folders" |
+| Deny bypass through overlapping or malformed selectors | Deny precedence regardless of specificity or order; case-sensitive matching; `IN*`, `?`, character classes, empty or space-padded selectors never match | `v1-policy.test.ts` "deny precedence and selectors" |
+| Revoked client keeps working | Removing a rule or disabling the client takes effect on the next call (tested well under the 5 s budget); a write in flight is re-authorized immediately before it is sent, so a move or flag change revoked while the call is pending is never issued | `v1-policy.test.ts` "revocation" (pending move and pending set_flags hold the write connection at SELECT, revoke, then assert no MOVE/COPY/STORE reached the server) |
+| Another local process talks to the sidecar | Unix socket only (never TCP/UDP: checked against `/proc` socket tables), directory 0700, socket 0600, and every request must carry a random 32-byte per-process secret that Node hands over on the child's stdin (not argv, not environment). Missing or wrong secret gives -32001 and no data | `v1-sidecar.test.ts` "sidecar boundary" |
+| Credentials leak from the sidecar | Credentials are sent only in `open` over the authenticated socket, kept in memory, never written to disk; the sidecar's argv and environment contain no mailbox password | `v1-sidecar.test.ts` (argv/environ check); "never logged" is **untested** at the log level beyond the v0 log check |
+| Message bodies persist in the cache | The cache holds UIDs, flags and headers only. Every body read goes to IMAP (`BODY.PEEK`) again and does not set `\Seen` | `v1-sidecar.test.ts` "bodies are never cached" |
+| Stale or aliased UIDs after the folder is recreated | Cache identity is (mailbox, folder, UIDVALIDITY, UID). A UIDVALIDITY change drops the folder cache; a reference with the old UIDVALIDITY yields `STALE_REFERENCE` even when the same UID number now belongs to a different message | `v1-sidecar.test.ts` "UIDVALIDITY change" |
+| Cache drifts from the server (expunge, flag change by another client) | Periodic UID and flag reconciliation (`SYNC_RECONCILE_SECS`, default 30 s); UIDNEXT only guides fetching new mail and is never treated as complete | `v1-sidecar.test.ts` "UIDNEXT arrivals" and "reconciliation" |
+| Sidecar crash or kill | Node supervises it (backoff restart, health ping), re-opens mailboxes lazily; the cache is rebuilt from IMAP and reflects changes made while it was down. If the sidecar is unavailable tools return `UPSTREAM_ERROR`; there is no silent fallback to another read path (`SIDECAR_DISABLED=1` is a debugging switch only) | `v1-sidecar.test.ts` "forced sidecar kill and restart" |
+
+## Cache leakage rules (normative)
+
+1. Cached headers are returned only after the same `(client, mailbox, folder, operation)` check a fresh read would need, followed by a per-result folder check.
+2. No code path serves a cache hit to a caller that Node did not authorize; the sidecar has no listener except the authenticated socket.
+3. Folder-less queries enumerate folders through the policy filter first; denied folders are neither read from the cache nor synced.
+4. Error text, result counts and ordering must not depend on the contents of a folder the client may not search.
+5. The cache is in memory, scoped to the sidecar process, keyed by mailbox id; removing a mailbox or closing it drops its folders.
+6. Bodies are never cached.
+
+## Residual risks and limitations in v1
+
+- The sidecar and Node run as the same OS user. A compromised Node process can talk to the sidecar by definition; a compromised sidecar holds the mailbox passwords of every opened mailbox and the headers in its cache. This is the same trust level as v0's single process, not better; the benefit of the split is a small, authenticated, read-only surface, not process-level isolation from Node.
+- Another process running as the same OS user can read the sidecar's memory or ptrace it unless the host forbids it; out of scope (see v0 non-goals).
+- Timing side channels: a denied folder is never contacted, but response latency of a folder-less search depends on how many folders the client may search. This only reveals the client's own rights.
+- Folder identity is the IMAP path as listed. Renaming a folder makes its selectors stop matching (fail closed, but it can silently remove access); a path that becomes covered by an existing prefix selector after a rename is covered.
+- The "within 5 s" revocation budget is met because the policy is read live; it does not apply to a tool call that already passed its checks and is mid-read (reads in flight finish). Writes are re-checked just before they are sent, but a write already sent cannot be recalled.
+- Writes remain in Node and use their own IMAP connection (v0 behavior, including the ambiguous-outcome rules); the sidecar's cache learns of them via `invalidate` or the next reconcile, so a search right after a write can be stale for up to the reconcile interval if `invalidate` fails.
+- Remote body search is passed to the mail server; its latency and cost are the provider's.
+- Benchmarks and tests run against a purpose-built fake IMAP server; behavior with Dovecot, Gmail or Exchange is **untested**.
+- XOAUTH2 and CONDSTORE/QRESYNC are not implemented (`docs/BACKLOG.md`).

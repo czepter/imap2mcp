@@ -73,7 +73,7 @@ export async function startServer(o: StartOpts): Promise<RunningServer> {
     SESSION_SECRET: o.work.sessionSecret,
     REGISTRATION_MODE: "dynamic",
     ALLOW_PRIVATE_HOSTS: "localhost",
-    ...(o.caFile ? { NODE_EXTRA_CA_CERTS: o.caFile } : {}),
+    ...(o.caFile ? { NODE_EXTRA_CA_CERTS: o.caFile, SIDECAR_EXTRA_CA_FILE: o.caFile } : {}),
     ...o.env,
   };
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
