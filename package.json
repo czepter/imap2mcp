@@ -1,13 +1,14 @@
 {
-  "name": "imap-mcp-server",
-  "version": "1.1.0",
+  "name": "imap2mcp",
+  "version": "0.1.0",
   "description": "Multi-agent multi-user HTTP IMAP bridge with OAuth 2.1 for MCP",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

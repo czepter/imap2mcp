@@ -1,0 +1,81 @@
+# v0 Design Contract ("grob gehalten")
+
+Binding for all v0 work. Source: `docs/PRD.md`, `docs/VERSION_PLAN.md`. Baseline code is derived from
+upstream mkrasselt1/imap-mcp-server; much of it is replaced. **Single owner, SQLite (better-sqlite3), TypeScript ESM, Node 22.**
+
+## Decisions (resolves PRD §13 blockers)
+| # | Decision |
+|---|---|
+| Store | SQLite via better-sqlite3, WAL. DB path `DATA_DIR/bridge.db` (default `./data`). |
+| License | MIT (`LICENSE`), upstream notice retained. |
+| Encryption | AES-256-GCM, per-record random 12-byte IV, AAD = `"<table>:<row id>:<column>"`. Stored format `v1:<keyId>:<b64 iv>:<b64 ct>:<b64 tag>` in ONE column (no separate iv column). Master key is 32 bytes from `ENCRYPTION_KEY_FILE` (path, preferred; file content hex or base64) or `ENCRYPTION_KEY` (hex, 64 chars). No default key, ever: missing/malformed/wrong key => process refuses to start / decrypt throws (fail closed). `keyId` = first 8 hex of sha256(key), stored for rotation later. DB-column encryption (not whole-DB). Threat model: protects copied DB/WAL only, not a compromised running host. |
+| Tokens | Opaque, 32 random bytes base64url. Only `sha256` hex stored (`token_hash`). Refresh tokens also hashed (rotation on use). Access TTL 1h, refresh 30d. |
+| Audience | Resource = `${BASE_URL}/mcp` (RFC 8707 `resource` param; default to it if absent, reject if different). Stored on code+token; MCP middleware rejects mismatch. |
+| Admin auth | Single owner. First run: server prints one-time bootstrap token (also `ADMIN_BOOTSTRAP_TOKEN` env override) to stdout; `/setup` (only reachable while `admin` table empty) requires it + chosen password (scrypt). After bootstrap `/setup` returns 404. No signup. Sessions via express-session, cookie httpOnly, sameSite=lax, secure when BASE_URL is https. CSRF token (per-session, in every POST form, verified). Login + token + register endpoints rate limited (in-memory). `SESSION_SECRET` required (no default). |
+| Client registration | `REGISTRATION_MODE=dynamic` (default; RFC 7591, grants nothing) or `admin` (clients created in UI only). Redirect URIs validated (https, or http on localhost loopback). |
+| SSRF policy | Mailbox host must resolve to public IPs unless host is in `ALLOW_PRIVATE_HOSTS` (comma list). Applied in connection test AND every connect. TLS always on with cert validation; no plaintext fallback; no `rejectUnauthorized:false`. |
+| IMAP | imapflow. Password/LOGIN-PLAIN over TLS only. Reads use `BODY.PEEK` (never set \Seen). Move via UID MOVE / COPY+flag-delete-of-those-UIDs only (UID EXPUNGE; never plain EXPUNGE). Flags exclude `\Deleted` (and `\Recent`). |
+| Message ref | `{mailbox, folder, uidValidity, uid}` encoded in tools as an object; stale UIDVALIDITY => error `STALE_REFERENCE`. |
+| Limits | page size max 50; batch max 25 messages; body capped 200 KB (flag `truncated`). |
+| Tool errors | `{isError:true, content:[{type:"text", text: JSON {code, message}}]}`. Codes: `FORBIDDEN`, `NOT_FOUND`, `STALE_REFERENCE`, `INVALID_INPUT`, `UNSUPPORTED`, `UPSTREAM_ERROR`, `UNKNOWN_OUTCOME`. Never include secrets. |
+
+## Capabilities and policy
+Capabilities: `read`, `draft`, `organize` (independent; none implies another). OAuth scope strings: `mail:read`, `mail:draft`, `mail:organize`.
+Grant row = `(client_id, mailbox_id, capability)`; absence = deny.
+**Effective access on every tool call** = token scopes (ceiling) ∩ live grant rows for (token.client_id, mailbox_id) ∩ requested op. Revoked/expired token => 401. Grant removal takes effect on the next call for existing tokens. Granting a capability beyond a token's scopes needs a new consent (new token); never widen existing tokens.
+Policy API (in `src/policy/policy.ts`, pure + DB reads, no caching in v0):
+```ts
+export type Capability = "read" | "draft" | "organize";
+export function assertAllowed(ctx: TokenContext, mailboxId: string, cap: Capability): void; // throws PolicyError (code FORBIDDEN)
+export function allowedMailboxes(ctx: TokenContext, cap: Capability): string[];
+```
+Tool→capability: list_mailboxes (returns only mailboxes with any grant, ids+labels, no hosts), list_folders/search_messages/read_message => `read`; create_draft => `draft` (target is the mailbox's configured Drafts folder ONLY, no read); move_message/set_flags => `organize` (source AND destination folder in same mailbox; returns identifiers only, no content).
+
+## Schema
+`src/db/migrations/001_initial.sql` (replaces upstream's; applied by a `schema_migrations` runner in `src/db/database.ts`):
+```sql
+CREATE TABLE admin (id INTEGER PRIMARY KEY CHECK (id=1), password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE mailboxes (
+  id TEXT PRIMARY KEY, label TEXT NOT NULL,
+  imap_host TEXT NOT NULL, imap_port INTEGER NOT NULL DEFAULT 993,
+  imap_username TEXT NOT NULL, imap_password_enc TEXT NOT NULL,   -- v1:... format
+  drafts_folder TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE oauth_clients (
+  client_id TEXT PRIMARY KEY, client_name TEXT, redirect_uris TEXT NOT NULL, -- JSON array
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), disabled INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE grants (
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  capability TEXT NOT NULL CHECK (capability IN ('read','draft','organize')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, mailbox_id, capability));
+CREATE TABLE oauth_codes (
+  code_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  redirect_uri TEXT NOT NULL, scopes TEXT NOT NULL, resource TEXT NOT NULL,
+  code_challenge TEXT NOT NULL, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE oauth_tokens (
+  id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, refresh_hash TEXT UNIQUE,
+  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  scopes TEXT NOT NULL, resource TEXT NOT NULL,
+  expires_at TEXT NOT NULL, refresh_expires_at TEXT, revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
+```
+Consent screen: owner (logged in) sees client, requested scopes, and checkboxes per mailbox x capability (only requested scopes); approval writes `grants` rows + issues code with those scopes. Timestamps stored ISO-8601 UTC.
+
+## Shared interfaces (types in `src/types.ts`)
+```ts
+export interface TokenContext { tokenId: string; clientId: string; scopes: Capability[]; } // derived from mail:* scopes
+export class PolicyError extends Error { code = "FORBIDDEN" }
+// src/imap/mailboxes.ts  — owned by workstream B
+export function getMailbox(id: string): Mailbox | null; export function listMailboxes(): Mailbox[]; // no secret fields
+export function getMailboxCredentials(id: string): { host; port; user; password } // decrypts; server-internal only
+// src/imap/client.ts — owned by workstream C: withImap(mailboxId, fn: (c: ImapFlow) => Promise<T>): Promise<T> (pooled, SSRF-checked, TLS-validated, 30s timeout)
+```
+
+## Workstreams (disjoint file ownership)
+- **A Foundation & Admin** — `src/config.ts`, `src/imap/crypto.ts`, `src/db/**`, `src/auth/**`, `src/index.ts`, security middleware (headers, CSRF, rate limiter in `src/security/**`), `/setup` + `/login`, `.env.example`, Dockerfile/compose.
+- **B OAuth & Web UI** — `src/oauth/**`, `src/web/**`, `src/imap/mailboxes.ts`, `src/imap/ssrf.ts`. Mailbox CRUD + connection test + Drafts folder selection (list IMAP folders, pick), clients list, grants editor (per client x mailbox checkboxes), token revoke, consent screen.
+- **C MCP & Policy** — `src/mcp/**`, `src/policy/**`, `src/imap/client.ts`. Tools: `list_mailboxes, list_folders, search_messages, read_message, create_draft, move_message, set_flags`. Remove old list_messages/send/context-by-session map in favor of per-request validated token context.
+- **D Tests & Docs** — `test/**`, `vitest.config.ts`, `docs/THREAT_MODEL.md`, `README.md`, `docs/OPERATIONS.md`. Integration tests need a local IMAP fixture: use a docker `greenmail/standalone` if docker is available, otherwise an in-process fake IMAP server; skip with a clear message, never silently pass.
+
+Agents do not run `git commit` and do not edit files outside their ownership (ask via the final report). `npm run build` and `npm test` must stay runnable; until peers land, stub against the interfaces above.
