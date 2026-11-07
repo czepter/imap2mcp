@@ -27,6 +27,10 @@ export function layout(title: string, body: string, username?: string): string {
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #e5e7eb; }
   th { background: #f9fafb; font-weight: 600; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .inline { display: inline; }
+  .inline button { margin-top: 0; padding: 4px 10px; }
+  td input[type="checkbox"] { width: auto; }
   .small { font-size: 12px; color: #6b7280; }
 </style>
 </head><body>

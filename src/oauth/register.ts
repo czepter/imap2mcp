@@ -1,53 +1,47 @@
 import { Router } from "express";
-import { v4 as uuid } from "uuid";
+import { randomUUID } from "crypto";
 import { getDb } from "../db/database.js";
+import { config } from "../config.js";
+import { validRedirectUri, rateLimiter } from "./common.js";
 
 const router = Router();
+const limit = rateLimiter(20, 15 * 60 * 1000);
 
-function handleRegister(req: any, res: any) {
-  const { client_name, redirect_uris, grant_types, response_types, scope } = req.body;
 
-  if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
-    return res.status(400).json({ error: "invalid_client_metadata", error_description: "redirect_uris required" });
+// RFC 7591 dynamic client registration. Public clients only; registration grants no mail access.
+router.post("/oauth/register", limit, (req, res) => {
+  if (config.registrationMode !== "dynamic") {
+    return res.status(403).json({
+      error: "access_denied",
+      error_description: "Dynamic client registration is disabled; clients are provisioned by the administrator",
+    });
   }
-
-  for (const uri of redirect_uris) {
-    try {
-      const parsed = new URL(uri);
-      if (!["http:", "https:"].includes(parsed.protocol)) {
-        return res.status(400).json({ error: "invalid_client_metadata", error_description: "redirect_uris must use http or https" });
-      }
-    } catch {
-      return res.status(400).json({ error: "invalid_client_metadata", error_description: "redirect_uris must be valid URLs" });
-    }
+  const body = req.body ?? {};
+  const uris = body.redirect_uris;
+  if (!Array.isArray(uris) || uris.length === 0 || uris.length > 10 || !uris.every(validRedirectUri)) {
+    return res.status(400).json({
+      error: "invalid_redirect_uri",
+      error_description: "redirect_uris must be 1-10 https URIs (http only for localhost loopback), no fragments",
+    });
   }
-
-  const clientId = uuid();
-  const db = getDb();
-
-  db.prepare(`
-    INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, response_types)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    clientId,
-    client_name || null,
-    JSON.stringify(redirect_uris),
-    JSON.stringify(grant_types || ["authorization_code"]),
-    JSON.stringify(response_types || ["code"])
-  );
-
+  const method = body.token_endpoint_auth_method;
+  if (method !== undefined && method !== "none") {
+    return res.status(400).json({ error: "invalid_client_metadata", error_description: "Only token_endpoint_auth_method=none is supported" });
+  }
+  const name = typeof body.client_name === "string" ? body.client_name.slice(0, 100) : null;
+  const clientId = randomUUID();
+  getDb()
+    .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris) VALUES (?, ?, ?)")
+    .run(clientId, name, JSON.stringify(uris));
   res.status(201).json({
     client_id: clientId,
-    client_name: client_name || null,
-    redirect_uris,
-    grant_types: grant_types || ["authorization_code"],
-    response_types: response_types || ["code"],
+    client_name: name ?? undefined,
+    redirect_uris: uris,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
     token_endpoint_auth_method: "none",
+    client_id_issued_at: Math.floor(Date.now() / 1000),
   });
-}
-
-// Mount at both paths (Claude.ai may ignore the metadata registration_endpoint)
-router.post("/oauth/register", handleRegister);
-router.post("/register", handleRegister);
+});
 
 export default router;

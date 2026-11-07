@@ -1,77 +1,62 @@
 import Database from "better-sqlite3";
-import { join } from "path";
-import { mkdirSync } from "fs";
+import { join, dirname } from "path";
+import { mkdirSync, readdirSync, readFileSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { config } from "../config.js";
 
-let db: Database.Database;
+let db: Database.Database | undefined;
 
-const MIGRATION_SQL = `
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  username TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
-);
+function migrationsDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const local = join(here, "migrations");
+  if (existsSync(local)) return local;
+  // compiled to dist/db: fall back to the source tree copy
+  const src = join(here, "..", "..", "src", "db", "migrations");
+  if (existsSync(src)) return src;
+  throw new Error("Migrations directory not found (expected next to database.js or at src/db/migrations)");
+}
 
-CREATE TABLE IF NOT EXISTS imap_accounts (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  label TEXT NOT NULL,
-  imap_host TEXT NOT NULL,
-  imap_port INTEGER NOT NULL DEFAULT 993,
-  imap_tls INTEGER NOT NULL DEFAULT 1,
-  username TEXT NOT NULL,
-  password_encrypted TEXT NOT NULL,
-  password_iv TEXT NOT NULL,
-  smtp_host TEXT,
-  smtp_port INTEGER DEFAULT 587,
-  smtp_tls INTEGER DEFAULT 1,
-  created_at TEXT DEFAULT (datetime('now'))
-);
+/** Apply pending NNN_name.sql files in order, each in a transaction, recorded in schema_migrations. */
+export function runMigrations(database: Database.Database, dir: string = migrationsDir()): string[] {
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
+  );
+  const applied = new Set(
+    (database.prepare("SELECT version FROM schema_migrations").all() as { version: string }[]).map((r) => r.version)
+  );
+  const files = readdirSync(dir).filter((f) => /^\d+.*\.sql$/.test(f)).sort();
+  const ran: string[] = [];
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const sql = readFileSync(join(dir, file), "utf8");
+    database.transaction(() => {
+      database.exec(sql);
+      database.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(file);
+    })();
+    ran.push(file);
+  }
+  return ran;
+}
 
-CREATE TABLE IF NOT EXISTS oauth_clients (
-  client_id TEXT PRIMARY KEY,
-  client_name TEXT,
-  redirect_uris TEXT NOT NULL,
-  grant_types TEXT NOT NULL,
-  response_types TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS oauth_codes (
-  code TEXT PRIMARY KEY,
-  client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
-  user_id TEXT NOT NULL REFERENCES users(id),
-  account_id TEXT NOT NULL REFERENCES imap_accounts(id),
-  redirect_uri TEXT NOT NULL,
-  scopes TEXT NOT NULL,
-  code_challenge TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  used INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS oauth_tokens (
-  id TEXT PRIMARY KEY,
-  access_token TEXT UNIQUE NOT NULL,
-  refresh_token TEXT UNIQUE,
-  client_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  scopes TEXT NOT NULL,
-  access_token_expires_at TEXT NOT NULL,
-  refresh_token_expires_at TEXT,
-  revoked INTEGER DEFAULT 0
-);
-`;
+/** Open a database at a path (":memory:" allowed) with pragmas and migrations applied. Used by tests too. */
+export function openDatabase(path: string): Database.Database {
+  const d = new Database(path);
+  d.pragma("journal_mode = WAL");
+  d.pragma("foreign_keys = ON");
+  runMigrations(d);
+  return d;
+}
 
 export function getDb(): Database.Database {
   if (!db) {
-    const dataDir = join(process.cwd(), "data");
-    mkdirSync(dataDir, { recursive: true });
-    const dbPath = join(dataDir, "bridge.db");
-    db = new Database(dbPath);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    db.exec(MIGRATION_SQL);
+    mkdirSync(config.dataDir, { recursive: true });
+    db = openDatabase(config.dbPath);
   }
   return db;
+}
+
+/** Test helper: close and forget the singleton. */
+export function closeDb(): void {
+  db?.close();
+  db = undefined;
 }

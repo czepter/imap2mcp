@@ -2,12 +2,20 @@ services:
   imap-bridge:
     build: .
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/app/data
     environment:
-      - BASE_URL=https://your-domain.com
-      - PORT=3000
-      - ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
-      - SESSION_SECRET=change-this-to-a-random-secret
+      BASE_URL: ${BASE_URL:?set BASE_URL}
+      PORT: "3000"
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      ENCRYPTION_KEY_FILE: /run/secrets/imap2mcp_key
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-dynamic}
+      ALLOW_PRIVATE_HOSTS: ${ALLOW_PRIVATE_HOSTS:-}
+    secrets:
+      - imap2mcp_key
     restart: unless-stopped
+
+secrets:
+  imap2mcp_key:
+    file: ./secrets/imap2mcp_key   # openssl rand -hex 32 > secrets/imap2mcp_key
