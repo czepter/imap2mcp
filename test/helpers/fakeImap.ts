@@ -42,11 +42,25 @@ export class FakeImapServer {
   private sockets = new Set<import("node:net").Socket>();
   port = 0;
 
-  constructor(private opts: { key: string; cert: string }) {}
+  constructor(private opts: { key: string; cert: string; move?: boolean }) {}
+
+  private caps(): string {
+    return `IMAP4rev1 UIDPLUS ${this.opts.move === false ? "" : "MOVE "}ID NAMESPACE AUTH=PLAIN`.replace("  ", " ");
+  }
+  /** Kill every open connection (simulates server restart; clients must reconnect and re-SELECT). */
+  dropConnections(): void {
+    for (const s of this.sockets) s.destroy();
+  }
 
   async start(): Promise<void> {
     this.server = tls.createServer({ key: this.opts.key, cert: this.opts.cert }, (s) => this.onConn(s));
-    await new Promise<void>((r) => this.server.listen(0, "127.0.0.1", r));
+    // dual-stack so "localhost" works whichever family it resolves to first
+    await new Promise<void>((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen({ port: 0, host: "::", ipv6Only: false }, resolve);
+    }).catch(async () => {
+      await new Promise<void>((r) => this.server.listen(0, "127.0.0.1", r));
+    });
     this.port = (this.server.address() as AddressInfo).port;
   }
   async stop(): Promise<void> {
@@ -101,7 +115,7 @@ export class FakeImapServer {
     let authTag: string | null = null;
 
     const write = (s: string | Buffer) => sock.write(s);
-    write("* OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE AUTH=PLAIN] fake imap ready\r\n");
+    write(`* OK [CAPABILITY ${this.caps()}] fake imap ready\r\n`);
 
     const pump = () => {
       for (;;) {
@@ -166,7 +180,7 @@ export class FakeImapServer {
     if (a && a.pass === p) {
       st.user = u;
       st.acct = a;
-      write(`${tag} OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE] logged in\r\n`);
+      write(`${tag} OK [CAPABILITY ${this.caps().replace(" AUTH=PLAIN", "")}] logged in\r\n`);
     } else {
       write(`${tag} NO [AUTHENTICATIONFAILED] bad credentials\r\n`);
     }
@@ -198,7 +212,7 @@ export class FakeImapServer {
 
     switch (cmd) {
       case "CAPABILITY":
-        write("* CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE AUTH=PLAIN\r\n");
+        write(`* CAPABILITY ${this.caps()}\r\n`);
         return ok();
       case "NOOP":
       case "CHECK":
@@ -331,6 +345,7 @@ export class FakeImapServer {
       }
       case "COPY":
       case "MOVE": {
+        if (sub === "MOVE" && this.opts.move === false) return write(`${tag} BAD MOVE not supported\r\n`);
         const dest = acct.folders.get(String(a[1]));
         if (!dest) return no("[TRYCREATE] no such mailbox");
         const msgs = pick(String(a[0]));

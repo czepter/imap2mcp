@@ -4,7 +4,9 @@ COPY package*.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npm run build && mkdir -p dist/db && cp -r src/db/migrations dist/db/migrations
+COPY drizzle.config.ts ./
+COPY drizzle/ ./drizzle/
+RUN npm run build
 
 FROM node:22-slim
 WORKDIR /app
@@ -13,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends dumb-init && rm
 COPY --from=build /app/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/drizzle ./drizzle
 RUN mkdir -p /app/data && chown node:node /app/data
 VOLUME /app/data
 EXPOSE 3000

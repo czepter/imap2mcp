@@ -1,62 +1,59 @@
 import Database from "better-sqlite3";
-import { join, dirname } from "path";
-import { mkdirSync, readdirSync, readFileSync, existsSync } from "fs";
+import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { dirname, join } from "path";
+import { mkdirSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { config } from "../config.js";
+import * as schema from "./schema.js";
 
 let db: Database.Database | undefined;
+let orm: BetterSQLite3Database<typeof schema> | undefined;
 
-function migrationsDir(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const local = join(here, "migrations");
-  if (existsSync(local)) return local;
-  // compiled to dist/db: fall back to the source tree copy
-  const src = join(here, "..", "..", "src", "db", "migrations");
-  if (existsSync(src)) return src;
-  throw new Error("Migrations directory not found (expected next to database.js or at src/db/migrations)");
-}
-
-/** Apply pending NNN_name.sql files in order, each in a transaction, recorded in schema_migrations. */
-export function runMigrations(database: Database.Database, dir: string = migrationsDir()): string[] {
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
-  );
-  const applied = new Set(
-    (database.prepare("SELECT version FROM schema_migrations").all() as { version: string }[]).map((r) => r.version)
-  );
-  const files = readdirSync(dir).filter((f) => /^\d+.*\.sql$/.test(f)).sort();
-  const ran: string[] = [];
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const sql = readFileSync(join(dir, file), "utf8");
-    database.transaction(() => {
-      database.exec(sql);
-      database.prepare("INSERT INTO schema_migrations (version) VALUES (?)").run(file);
-    })();
-    ran.push(file);
+/** Locate <package root>/drizzle from src/db or dist/db (and Docker, where drizzle/ sits next to dist/). */
+export function migrationsFolder(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 4; i++) {
+    const candidate = join(dir, "drizzle");
+    if (existsSync(join(candidate, "meta", "_journal.json"))) return candidate;
+    dir = dirname(dir);
   }
-  return ran;
+  throw new Error("Drizzle migrations folder not found (run npm run db:generate)");
 }
 
-/** Open a database at a path (":memory:" allowed) with pragmas and migrations applied. Used by tests too. */
-export function openDatabase(path: string): Database.Database {
-  const d = new Database(path);
-  d.pragma("journal_mode = WAL");
-  d.pragma("foreign_keys = ON");
-  runMigrations(d);
-  return d;
+/** Open a database (":memory:" allowed) with pragmas and all migrations applied. Used by tests too. */
+export function openDatabase(path: string): { raw: Database.Database; orm: BetterSQLite3Database<typeof schema> } {
+  const raw = new Database(path);
+  raw.pragma("journal_mode = WAL");
+  raw.pragma("foreign_keys = ON");
+  const o = drizzle(raw, { schema });
+  migrate(o, { migrationsFolder: migrationsFolder() });
+  return { raw, orm: o };
 }
 
-export function getDb(): Database.Database {
+function init() {
   if (!db) {
     mkdirSync(config.dataDir, { recursive: true });
-    db = openDatabase(config.dbPath);
+    const r = openDatabase(config.dbPath);
+    db = r.raw;
+    orm = r.orm;
   }
-  return db;
+}
+
+/** Raw better-sqlite3 handle. */
+export function getDb(): Database.Database {
+  init();
+  return db!;
+}
+
+export function getOrm(): BetterSQLite3Database<typeof schema> {
+  init();
+  return orm!;
 }
 
 /** Test helper: close and forget the singleton. */
 export function closeDb(): void {
   db?.close();
   db = undefined;
+  orm = undefined;
 }

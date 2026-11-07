@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import session from "express-session";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { validateStartup } from "./config.js";
 
@@ -24,7 +23,7 @@ import authorizeRouter from "./oauth/authorize.js";
 import tokenRouter from "./oauth/token.js";
 import { bearerAuth } from "./oauth/middleware.js";
 import webRouter from "./web/routes.js";
-import * as mcpModule from "./mcp/server.js";
+import { handleMcpRequest } from "./mcp/server.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -65,30 +64,7 @@ app.use(tokenRouter);
 app.use(webRouter);
 
 // MCP: stateless streamable HTTP; a fresh server per request carries the validated token context.
-const mcp: any = mcpModule;
-if (typeof mcp.mcpHandler === "function") {
-  app.all("/mcp", bearerAuth as any, mcp.mcpHandler);
-} else {
-  app.post("/mcp", bearerAuth as any, async (req: any, res: any) => {
-    const server = mcp.createMcpServer(req.tokenContext);
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => {
-      void transport.close();
-      void server.close?.();
-    });
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (e) {
-      console.error("MCP error:", (e as Error).message);
-      if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });
-    }
-  });
-  const notAllowed = (_req: any, res: any) =>
-    res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
-  app.get("/mcp", bearerAuth as any, notAllowed);
-  app.delete("/mcp", bearerAuth as any, notAllowed);
-}
+app.all("/mcp", bearerAuth as any, handleMcpRequest as any);
 
 app.listen(config.port, () => {
   console.log(`IMAP Bridge running at ${config.baseUrl}`);

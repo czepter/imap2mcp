@@ -46,11 +46,13 @@ function touch(mailboxId: string, entry: Entry): void {
 
 async function connect(mailboxId: string): Promise<Entry> {
   const creds = getMailboxCredentials(mailboxId);
-  await assertHostAllowed(creds.host); // SSRF policy on every connect
+  const addrs = await assertHostAllowed(creds.host); // SSRF policy on every connect
   const client = new ImapFlow({
-    host: creds.host,
+    host: addrs[0], // pin to the vetted address (DNS-rebinding guard)
     port: creds.port,
-    secure: true, // implicit TLS, certificate validation on; no downgrade, no rejectUnauthorized override
+    secure: true, // implicit TLS, certificate validation on; no downgrade
+    servername: creds.host,
+    tls: { servername: creds.host, rejectUnauthorized: true },
     auth: { user: creds.user, pass: creds.password },
     logger: false,
     socketTimeout: OPERATION_TIMEOUT_MS,
