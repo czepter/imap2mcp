@@ -144,6 +144,10 @@ function normalizeInner(e: unknown, mutating: boolean): ToolError {
   }
   if (e instanceof SidecarTimeoutError) return new ToolError("TIMEOUT", "Mailbox operation timed out");
   if (e instanceof SidecarUnavailableError) return new ToolError("UNAVAILABLE", "Mailbox service is unavailable");
+  // A failure of our own database is not a mail-server problem (its message may contain words like "malformed").
+  if ((e as { name?: string } | null)?.name === "SqliteError" || /^SQLITE_/.test((e as { code?: string } | null)?.code ?? "")) {
+    return new ToolError("UNAVAILABLE", "The bridge's local database is unavailable", undefined, { retryable: false });
+  }
   const c = classifyUpstream(e);
   if (c) {
     if (c.definite || !mutating) return fromKind(c.kind, mutating);
