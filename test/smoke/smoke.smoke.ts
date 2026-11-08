@@ -192,7 +192,9 @@ describe.skipIf(!!skipReason)("container smoke", () => {
   it("starts non-root; /healthz and /readyz are public, no-store and leak nothing", async () => {
     c = await run("i2m-smoke-main", { dataDir, keyFile, caFile });
     await waitHealthz(c);
-    expect(docker(["exec", c.name, "id", "-u"]).out.trim()).toBe("1000");
+    // The container is started with --user <host uid> for bind-mount access; the image's own default must be non-root.
+    expect(docker(["image", "inspect", "--format", "{{.Config.User}}", IMAGE]).out.trim()).toBe("node");
+    expect(docker(["exec", c.name, "id", "-u"]).out.trim()).not.toBe("0");
 
     const h = await fetch(`${c.base}/healthz`);
     expect(h.status).toBe(200);
