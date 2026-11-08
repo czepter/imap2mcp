@@ -29,6 +29,7 @@ All upstream operations of one tool call share a **30 s total budget** (retries 
 | `FOLDER_UNAVAILABLE` | The folder exists but the server refused or could not select it (`NO [UNAVAILABLE]`, `NO [NOPERM]`). Distinct from `NOT_FOUND`. Policy-denied folders never return this code. | no | Check the folder's availability/permissions at the provider; try again later. |
 | `PROTOCOL_ERROR` | The server sent a malformed or unparseable reply to a read. (For a write, a malformed reply is `UNKNOWN_OUTCOME`.) | no | Check provider status and bridge logs for the `requestId`; report if reproducible. |
 | `UNAVAILABLE` | A bridge subsystem is down: the mail sidecar is unreachable/restarting, or the audit store could not be written while `AUDIT_FAIL_MODE=closed` (no data is returned / the write is not started). | yes (reads) | Check `/readyz`, the sidecar process, disk space and permissions of the data directory. |
+| `UNAVAILABLE` (undecryptable credentials) | A stored mailbox password cannot be decrypted, normally because the configured master key is not the one it was stored under. Message: "Stored mailbox credentials cannot be decrypted". No connection to the mail server is attempted. | **no** (even for reads) | "The server cannot decrypt stored mailbox credentials; check ENCRYPTION_KEY / key file (see docs/RECOVERY.md)." `/readyz` shows `key: fail`. |
 
 ## Write safety (no automatic replay)
 

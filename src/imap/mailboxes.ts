@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { ImapFlow } from "imapflow";
 import { getDb } from "../db/database.js";
 import { encrypt, decrypt } from "./crypto.js";
+import { CredentialDecryptError } from "./credentialError.js";
 import { assertHostAllowed } from "./ssrf.js";
 import { clearMailboxAuthFailure } from "./client.js";
 import { retryMailbox } from "../sidecar/index.js";
@@ -33,7 +34,9 @@ export function getMailboxCredentials(id: string): { host: string; port: number;
     | { imap_host: string; imap_port: number; imap_username: string; imap_password_enc: string }
     | undefined;
   if (!r) throw new Error("Mailbox not found");
-  return { host: r.imap_host, port: r.imap_port, user: r.imap_username, password: decrypt(r.imap_password_enc, aad(id)) };
+  let password: string;
+  try { password = decrypt(r.imap_password_enc, aad(id)); } catch { throw new CredentialDecryptError(); }
+  return { host: r.imap_host, port: r.imap_port, user: r.imap_username, password };
 }
 
 export interface MailboxInput {

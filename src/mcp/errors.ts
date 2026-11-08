@@ -1,5 +1,6 @@
 import { currentRequestId } from "../audit/context.js";
 import { ImapAuthError, ImapConnectError, ImapTimeoutError } from "../imap/client.js";
+import { CredentialDecryptError } from "../imap/credentialError.js";
 import { PolicyError } from "../types.js";
 import {
   RPC_AUTH, RPC_STALE_REFERENCE, RPC_TIMEOUT, RPC_UNKNOWN_MAILBOX, RPC_UPSTREAM,
@@ -13,6 +14,8 @@ export type ToolErrorCode =
 
 /** Codes that may be retryable (only ever on reads; writes are never marked retryable). */
 const MAYBE_RETRYABLE = new Set<ToolErrorCode>(["TIMEOUT", "UPSTREAM_ERROR", "UNAVAILABLE"]);
+
+const DECRYPT_ACTION = "The server cannot decrypt stored mailbox credentials; check ENCRYPTION_KEY / key file (see docs/RECOVERY.md).";
 
 export const OPERATOR_ACTIONS: Partial<Record<ToolErrorCode, string>> = {
   AUTH_FAILED: "The mail server rejected this mailbox's credentials. In the admin UI update the mailbox password (or press Retry once it is fixed at the provider).",
@@ -115,6 +118,11 @@ export function normalizeError(e: unknown, mutating = false): ToolError {
 function normalizeInner(e: unknown, mutating: boolean): ToolError {
   if (e instanceof ToolError) return e;
   if (e instanceof PolicyError) return new ToolError("FORBIDDEN", "Access denied");
+  if (e instanceof CredentialDecryptError) {
+    return new ToolError("UNAVAILABLE", "Stored mailbox credentials cannot be decrypted", undefined, {
+      retryable: false, operatorAction: DECRYPT_ACTION,
+    });
+  }
   if (e instanceof ImapAuthError) return fromKind("AUTH_FAILED", false);
   if (e instanceof ImapConnectError) {
     // Nothing was sent. A refused connect is a transient upstream problem.

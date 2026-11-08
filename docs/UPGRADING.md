@@ -25,8 +25,9 @@ This behavior is exercised by `npm run smoke` (old database -> upgraded image: b
 ```bash
 cd imap2mcp
 # 1. Take your own backup first (see "Manual backup" below), and make sure the master key is backed up separately.
-# 2. Fetch and rebuild
-git pull
+# 2. Keep the running image as a fallback, then fetch and rebuild
+docker tag imap2mcp:local imap2mcp:prev      # "imap2mcp:local" is the image name in docker-compose.yml
+git pull                                     # needs a checked-out branch (see below)
 docker compose build
 # 3. Replace the container; it migrates on start
 docker compose up -d
@@ -40,6 +41,9 @@ ls -l data/backups                           # the automatic pre-migration copy
 Then connect a client and run `list_folders` as a last check. Mailbox secrets, OAuth clients, grants and tokens survive upgrades; audit history is kept (subject to `AUDIT_RETENTION_DAYS`).
 
 Upgrades are **roll-forward**. A database that has been migrated by a newer build is not guaranteed to work with an older image.
+
+- `git pull` only works on a branch. After `git checkout <tag or commit>` you are on a detached HEAD and `git pull` fails with "You are not currently on a branch"; run `git checkout main` first (or `git fetch --tags` and check out the new tag).
+- For production, pin to a release tag instead of tracking `main`: `git fetch --tags && git checkout <tag>`. This repository does not publish release tags yet; until it does, pin to a commit hash and record it.
 
 ## Manual backup (online)
 
@@ -59,26 +63,48 @@ Copy it off the host. **Do not store the master key next to it.** A backup holds
 
 Alternatively stop the container (`docker compose stop`) and copy `data/bridge.db` together with any `bridge.db-wal` and `bridge.db-shm`. Do not copy `bridge.db` alone while the server runs.
 
-## Rollback: restore from a backup
+## Rollback
 
-Use this when an upgrade went wrong and you want the previous data state back (you also need the previous code: `git checkout <previous tag or commit>` and `docker compose build`).
+There are three paths, from the least to the most destructive. Pick by what went wrong.
+
+### A. Keep the new code, re-run the migrations (preferred when the data is the problem)
+
+Use this when a migration failed or left the database in a bad state but the new code is what you want to run. The pre-migration copy is the state *before* the migration ran, and the new code simply migrates it again (taking a new backup first).
 
 ```bash
 docker compose stop
-ls -l data/backups                                  # pick the pre-migration file you want
+ls -l data/backups                                  # pick the pre-migration file, e.g. bridge-<timestamp>-pre-<n>.db
 mv data/bridge.db data/bridge.db.failed-$(date +%s) # keep the broken one for analysis
 rm -f data/bridge.db-wal data/bridge.db-shm
 cp data/backups/bridge-<timestamp>-pre-<n>.db data/bridge.db
 chown 1000:1000 data/bridge.db                      # only needed if you ran cp as another user (use sudo)
-git checkout <previous version>                     # code matching that database
-docker compose build && docker compose up -d
+docker compose up -d                                # same image: migrations run again
 curl -s http://127.0.0.1:3000/readyz
 ```
 
-The restored file must be used with the **same master key** it was written under. Data written between the backup and the restore is lost (including audit rows and tokens issued since). If the backup is older than a revocation you care about, review **Tokens** and **Clients** in the UI after restoring and revoke what should no longer work. If you restored the pre-migration file and keep the *new* code, the migrations simply run again (and take a new backup).
+### B. Go back to the previous code and its database
+
+Use this when the new version misbehaves and you want the old one back. You need the previous image and a database it understands (the pre-migration copy).
+
+```bash
+docker compose stop
+# restore the database exactly as in path A (mv / rm / cp / chown), then use the old image:
+docker tag imap2mcp:prev imap2mcp:local             # the tag you saved before building
+docker compose up -d                                # no --build: it must not rebuild over the old image
+```
+
+If you did not save `imap2mcp:prev`, rebuild from the old source: `git checkout <previous tag or commit> && docker compose build && docker compose up -d`. This can fail for old commits: the v1 Dockerfile installed production dependencies in the final stage without build tools, so when `better-sqlite3` has no prebuilt binary for the current `node:22-slim` base image, `npm ci` there tries to compile it and fails (no `python3`/`make`/`g++`). The current Dockerfile compiles in a separate build stage that has those tools and copies the result. Prefer the saved image, or cherry-pick the current `Dockerfile` onto the old checkout. (Derived from comparing the two Dockerfiles; the old commit was not rebuilt here.)
+
+### C. Restore only the data, keep whatever code is running
+
+Same copy steps as A. Notes for any restore:
+
+- The restored file must be used with the **same master key** it was written under. Data written between the backup and the restore is lost (including audit rows and tokens issued since).
+- If the backup is older than a revocation you care about, review **Tokens** and **Clients** in the UI after restoring and revoke what should no longer work.
+- If you restored the pre-migration file and keep the *new* code, the migrations simply run again (and take a new backup): that is path A.
 
 ## Notes
 
-- Pin versions in production (`git checkout <tag>`) instead of tracking `main`.
+- Pin versions in production (a release tag once they exist, otherwise a commit hash) instead of tracking `main`.
 - Changing `BASE_URL` is not an upgrade: it invalidates all tokens, clients must re-authorize.
 - Restoring a database does not change the key: see RECOVERY.md for key problems.

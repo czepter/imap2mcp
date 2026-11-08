@@ -47,4 +47,51 @@ Grants (what a client may do) are separate from token lifetime: grant changes in
 
 ## Tools
 
-`list_mailboxes`, `list_folders`, `search_messages`, `read_message`, `create_draft`, `move_message`, `set_flags`. Message references are objects `{mailbox, folder, uidValidity, uid}`; limits: 50 per page, 25 per batch, 200 KB body. Errors are `{code, message}` with `FORBIDDEN`, `NOT_FOUND`, `STALE_REFERENCE`, `INVALID_INPUT`, `UNSUPPORTED`, `UPSTREAM_ERROR`, `UNKNOWN_OUTCOME`.
+| Tool | Arguments |
+|---|---|
+| `list_mailboxes` | none |
+| `list_folders` | `mailbox` |
+| `search_messages` | `mailbox`, `folder`; optional `text`, `from`, `to`, `subject`, `since`, `before` (`YYYY-MM-DD`), `unseen`, `flagged`, `limit` (1-50), `cursor` |
+| `read_message` | `ref`; optional `include` (`["headers"]`, `["body"]` or both) |
+| `create_draft` | `mailbox`, `subject`, `body`; optional `to[]`, `cc[]`, `inReplyTo` |
+| `move_message` | `ref`, `destination` |
+| `set_flags` | `refs[]` (1-25), optional `add[]`, `remove[]` |
+
+`mailbox` is the id from `list_mailboxes`. `ref` is `{mailbox, folder, uidValidity, uid}` as returned by earlier calls. Limits: 50 per page, 25 per batch, 200 KB body. Errors are `{code, message, requestId, retryable, operatorAction?}`; see `docs/ERRORS.md` for all codes.
+
+## Trying it with curl
+
+A hand-driven OAuth 2.1 + PKCE round trip, useful to check a deployment without any MCP client. Run it from the host against the published port; `BASE_URL` must be what is configured (only the `resource` value has to match it exactly). Needs `curl`, `openssl` and `jq`. The browser step needs an admin login and at least one mailbox.
+
+```bash
+B=http://127.0.0.1:3000                 # where you can reach the bridge
+BASE_URL=https://mcp.example.com        # exactly the configured BASE_URL (no trailing slash)
+REDIR=http://127.0.0.1:8976/cb          # nothing needs to listen there; you copy the code from the address bar
+
+# 1. Register (REGISTRATION_MODE=dynamic; in admin mode create the client in the UI and use its client_id)
+CID=$(curl -s -X POST $B/oauth/register -H 'content-type: application/json' \
+  -d "{\"client_name\":\"curl-demo\",\"redirect_uris\":[\"$REDIR\"],\"token_endpoint_auth_method\":\"none\"}" | jq -r .client_id)
+
+# 2. PKCE pair
+VER=$(openssl rand -base64 48 | tr -d '=+/\n' | cut -c1-64)
+CH=$(printf %s "$VER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# 3. Authorize in a browser: open this URL, log in, tick the mailbox capabilities, press "Allow".
+#    The browser is sent to $REDIR?code=...&state=xyz and shows a connection error: that is fine; copy the code.
+echo "$B/oauth/authorize?response_type=code&client_id=$CID&redirect_uri=$(jq -rn --arg u "$REDIR" '$u|@uri')&code_challenge=$CH&code_challenge_method=S256&state=xyz&scope=mail%3Aread&resource=$(jq -rn --arg u "$BASE_URL/mcp" '$u|@uri')"
+
+# 4. Exchange the code (valid 10 minutes, single use)
+CODE=<paste code>
+curl -s -X POST $B/oauth/token -d grant_type=authorization_code -d code=$CODE -d client_id=$CID \
+  --data-urlencode redirect_uri=$REDIR -d code_verifier=$VER --data-urlencode resource=$BASE_URL/mcp | tee token.json
+AT=$(jq -r .access_token token.json)
+
+# 5. Call the MCP endpoint (both Accept types are required; the reply is an SSE frame)
+curl -s -X POST $B/mcp -H "authorization: Bearer $AT" -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+curl -s -X POST $B/mcp -H "authorization: Bearer $AT" -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_mailboxes","arguments":{}}}'
+```
+
+Every step was run against a live container, including step 3 emulated with a cookie-jar login and the consent form POST (the real browser rendering was not exercised). Observed: registration returns a `client_id`; an unauthenticated `/oauth/authorize` redirects to `/login`; the token reply contains `access_token`, `refresh_token`, `expires_in: 3600` and the consented scope; `tools/list` returns the seven tools; `tools/call list_mailboxes` returns the granted mailbox. Without a token, `/mcp` answers 401.

@@ -13,12 +13,13 @@ This is the complete path from an empty Linux host to a working, TLS-fronted bri
 | Outbound TCP to your mail server's IMAPS port (993) | TLS only; there is no plaintext fallback. |
 | An IMAP account (host, port, user, password or app password) | Password login only (XOAUTH2 is on the backlog). |
 
-## 2. Get the code and build
+## 2. Get the code
 
 ```bash
 git clone <this repo> imap2mcp && cd imap2mcp
-docker compose build           # first build takes a few minutes (compiles the Go sidecar and better-sqlite3)
 ```
+
+Do **not** run `docker compose build` yet: Compose refuses to even parse `docker-compose.yml` until `.env` (step 3) defines `BASE_URL` and `SESSION_SECRET` (`required variable BASE_URL is missing a value`). The image is built in step 4 with `docker compose up -d --build`.
 
 The image runs as the non-root user `node` (uid 1000), keeps `dumb-init` as PID 1, contains the Go sidecar, and has a Docker `HEALTHCHECK` against `/healthz`.
 
@@ -55,10 +56,10 @@ chmod 600 .env
 
 Other settings (`REGISTRATION_MODE`, `ALLOW_PRIVATE_HOSTS`, `LOG_LEVEL`, `AUDIT_*`, ...) are described in `docs/OPERATIONS.md`. If your mail server is on a private address (LAN, VPN), list its exact host name in `ALLOW_PRIVATE_HOSTS`.
 
-## 4. Start and check health
+## 4. Build, start and check health
 
 ```bash
-docker compose up -d
+docker compose up -d --build                          # first build takes a few minutes (compiles the Go sidecar and better-sqlite3)
 docker compose ps                                     # STATUS becomes "Up ... (healthy)" within ~30 s
 curl -s http://127.0.0.1:3000/healthz                 # {"status":"ok"}
 curl -s http://127.0.0.1:3000/readyz                  # {"status":"ok","checks":{"db":"ok","key":"ok","sidecar":"ok","migrations":"ok"}}
@@ -89,6 +90,29 @@ curl -s https://mcp.example.com/readyz
 curl -s https://mcp.example.com/.well-known/oauth-authorization-server | head -c 200   # URLs start with https://
 ```
 
+### Trying the proxy locally (no public DNS)
+
+To rehearse the TLS setup on your own machine, use `https://localhost:8443` as `BASE_URL` (set it in `.env` and run `docker compose up -d`) and a Caddy that listens on that name and port with its internal CA. Caddy must reach the published port of the bridge, so either run it on the host network or point it at the host's published port:
+
+```
+# Caddyfile.local
+localhost:8443 {
+	tls internal
+	reverse_proxy 127.0.0.1:3000 {      # use your HOST_PORT
+		flush_interval -1
+	}
+}
+```
+
+```bash
+docker run -d --rm --name caddy-local --network host -v "$PWD/Caddyfile.local:/etc/caddy/Caddyfile:ro" caddy:2
+curl -k https://localhost:8443/readyz                       # -k: the internal CA is not trusted by your system
+docker exec caddy-local cat /data/caddy/pki/authorities/local/root.crt > caddy-root.crt
+curl --cacert caddy-root.crt https://localhost:8443/healthz  # verified without -k
+```
+
+Expect a certificate warning in the browser (and `curl` exit code 60 without `-k`) until you trust that root certificate. The host part of `BASE_URL` must match the Caddy site name, and the port must be the one Caddy listens on (8443 here); otherwise OAuth issuer and redirects point to the wrong place. This was run with Caddy 2 on Linux (`--network host` does not work the same on Docker Desktop for macOS/Windows; publish the port there and use `host.docker.internal` as upstream, not exercised here). Stop it with `docker rm -f caddy-local`.
+
 ## 6. First-run bootstrap
 
 On the first start without an admin the log shows a one-time token:
@@ -107,7 +131,32 @@ Sign in at `/login`.
 2. On the mailbox page press **Test connection**. A success shows the server's folders.
 3. Pick the **Drafts folder** and **Save Drafts folder**. `create_draft` only ever writes there; without it, draft grants are disabled.
 
-If the test says the host resolves to a private address, add the exact host name to `ALLOW_PRIVATE_HOSTS` and restart. If it reports a certificate error, the server certificate must be valid for that host name; for a private CA mount the CA file into the container and set `NODE_EXTRA_CA_CERTS` and `SIDECAR_EXTRA_CA_FILE` to its in-container path (certificate validation cannot be switched off).
+After saving, the mailbox page shows the connection status **unknown**. It stays that way until the bridge has actually connected (first successful tool call or connection test); it is not an error. In the same way, a freshly started bridge has no admin sessions: sessions are kept in memory and are lost on every restart or `up -d` that recreates the container, so you have to log in again (OAuth tokens are unaffected).
+
+If the test says the host resolves to a private address, add the exact host name to `ALLOW_PRIVATE_HOSTS` in `.env` and apply it with `docker compose up -d`.
+
+> **`docker compose restart` does not re-read `.env`.** It restarts the existing container with the environment it was created with. After any change to `.env` (or `docker-compose.override.yml`) run `docker compose up -d`, which recreates the container when the configuration changed. (Verified: with `LOG_LEVEL` changed in `.env`, the container still reported the old value after `restart` and the new one after `up -d`.)
+
+If the test reports a certificate error, the server certificate must be valid for that host name. For a private CA, create `docker-compose.override.yml` next to `docker-compose.yml` (Compose merges it automatically) and put your CA certificate (PEM, may contain several certificates) at `certs/private-ca.pem`:
+
+```yaml
+# docker-compose.override.yml
+services:
+  imap-bridge:
+    volumes:
+      - ./certs/private-ca.pem:/etc/ssl/private-ca.pem:ro
+    environment:
+      NODE_EXTRA_CA_CERTS: /etc/ssl/private-ca.pem      # Node path (connection test, direct IMAP)
+      SIDECAR_EXTRA_CA_FILE: /etc/ssl/private-ca.pem    # Go sidecar (all normal tool calls)
+```
+
+```bash
+chmod 644 certs/private-ca.pem      # must be readable by uid 1000 inside the container
+docker compose config               # check the merged result
+docker compose up -d
+```
+
+The sidecar refuses to start if `SIDECAR_EXTRA_CA_FILE` does not contain a valid PEM certificate (log: `SIDECAR_EXTRA_CA_FILE contains no certificates`; `/readyz` shows `sidecar: fail`), so use the real CA file, not a placeholder. Verified: the merged config shows both variables and the mount, and the container starts healthy with a valid PEM; a handshake against a server using that CA was not exercised. Certificate validation cannot be switched off.
 
 ## 8. Connect an MCP client (OAuth)
 
@@ -118,13 +167,27 @@ Point the client at `https://mcp.example.com/mcp`. It must support MCP authoriza
 
 On first connection the client sends you to `/oauth/authorize`. Log in if asked, then tick, per mailbox, what this client may do (read, draft, organize) and approve. Afterwards refine the rules per folder and operation under **Clients -> your client**, revoke grants or tokens at any time (effective on the next call).
 
-Verify the whole chain end to end, for example with the MCP Inspector or your client's own connector UI: `list_mailboxes` returns the mailbox and `list_folders` returns its folders.
+Verify the whole chain end to end, for example with your client's own connector UI: `list_mailboxes` returns the mailbox (note its `id`) and `list_folders` with `{"mailbox": "<id>"}` returns its folders.
+
+The seven tools and their arguments (the mailbox is always the `id` from `list_mailboxes`, not its label):
+
+| Tool | Arguments |
+|---|---|
+| `list_mailboxes` | none |
+| `list_folders` | `mailbox` |
+| `search_messages` | `mailbox`, `folder`; optional `text`, `from`, `to`, `subject`, `since`, `before` (`YYYY-MM-DD`), `unseen`, `flagged`, `limit` (1-50), `cursor` |
+| `read_message` | `ref`; optional `include` (`["headers"]`, `["body"]` or both) |
+| `create_draft` | `mailbox`, `subject`, `body`; optional `to[]`, `cc[]`, `inReplyTo` |
+| `move_message` | `ref`, `destination` (folder name) |
+| `set_flags` | `refs[]` (1-25), optional `add[]`, `remove[]` |
+
+`ref` is the object `{"mailbox", "folder", "uidValidity", "uid"}` exactly as returned by `search_messages`, `create_draft` or `move_message`. A minimal command-line OAuth + PKCE walk-through, for testing without a client, is in `docs/CLIENTS.md` ("Trying it with curl").
 
 ## 9. Operate
 
 - Logs: `docker compose logs -f imap-bridge` (JSON lines).
 - Access audit: **Audit log** in the admin UI, or `docker compose exec imap-bridge node dist/audit/cli.js --format csv`.
-- Stop/restart gracefully: `docker compose stop` / `docker compose restart` (waits up to 20 s; exit code 0).
+- Stop/restart gracefully: `docker compose stop` / `docker compose restart` (waits up to 20 s; exit code 0). `restart` keeps the old environment; after editing `.env` use `docker compose up -d`.
 - Upgrade: `docs/UPGRADING.md`. Problems: `docs/TROUBLESHOOTING.md`, `docs/RECOVERY.md`.
 
 ## Automated check of this procedure

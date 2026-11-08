@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ImapAuthError, ImapConnectError, ImapTimeoutError } from "../../src/imap/client.js";
 import { ToolError, errorPayload, errorResult, normalizeError } from "../../src/mcp/errors.js";
 import { runWithAudit } from "../../src/audit/context.js";
+import { CredentialDecryptError } from "../../src/imap/credentialError.js";
 import { PolicyError } from "../../src/types.js";
 import {
   RPC_AUTH, RPC_STALE_REFERENCE, RPC_TIMEOUT, RPC_UPSTREAM, SidecarRpcError, SidecarTimeoutError, SidecarUnavailableError,
@@ -11,6 +12,16 @@ import { log, redact, redactString, registerSecret, resetLogSecrets, setLogSink 
 const imapErr = (o: Record<string, unknown>) => Object.assign(new Error("Command failed"), o);
 
 describe("error taxonomy (docs/ERRORS.md)", () => {
+  it("undecryptable stored credentials => UNAVAILABLE, not retryable, fixed operatorAction, no leak", () => {
+    for (const mutating of [false, true]) {
+      const t = normalizeError(new CredentialDecryptError(), mutating);
+      expect(t.code).toBe("UNAVAILABLE");
+      expect(t.retryable).toBe(false);
+      expect(t.operatorAction).toBe("The server cannot decrypt stored mailbox credentials; check ENCRYPTION_KEY / key file (see docs/RECOVERY.md).");
+      expect(JSON.stringify(errorPayload(t, "r1"))).not.toMatch(/key [0-9a-f]{8}|GCM|AAD/i);
+    }
+  });
+
   it("auth failures => AUTH_FAILED with operatorAction, not retryable", () => {
     for (const e of [
       new ImapAuthError(), new ImapAuthError("x", true),

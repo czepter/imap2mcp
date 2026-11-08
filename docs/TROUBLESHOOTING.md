@@ -52,9 +52,10 @@ The container restarts automatically (`restart: unless-stopped`); `docker compos
 | Symptom | Cause and fix |
 |---|---|
 | Mailbox shows **Authentication failed** | The server rejected the credentials, so automatic attempts stopped (by design, to avoid lockouts). Fix the password or enable IMAP/app passwords at the provider, then press **Retry** (or edit the credentials). Tools answer `AUTH_FAILED` immediately meanwhile. |
-| Connection test: "Host resolves to a private..." | Add the exact host name to `ALLOW_PRIVATE_HOSTS` and restart. |
-| Connection test: TLS certificate error | Fix the server certificate or trust your CA via `NODE_EXTRA_CA_CERTS` and `SIDECAR_EXTRA_CA_FILE` (mount the file into the container). Validation cannot be disabled. |
+| Connection test: "Host resolves to a private..." | Add the exact host name to `ALLOW_PRIVATE_HOSTS` in `.env` and run `docker compose up -d` (`docker compose restart` does **not** re-read `.env`). |
+| Connection test: TLS certificate error | Fix the server certificate or trust your CA via `NODE_EXTRA_CA_CERTS` and `SIDECAR_EXTRA_CA_FILE` (INSTALL.md section 7 has a ready-made `docker-compose.override.yml`; the file must be a valid PEM readable by uid 1000, otherwise the sidecar exits at start). Apply with `docker compose up -d`. Validation cannot be disabled. |
 | Tools return `UNAVAILABLE` for everything and the log mentions audit | The audit row could not be written and `AUDIT_FAIL_MODE=closed` (default) refuses to serve unaudited. Check disk space and `/readyz`. Set `open` only if you accept unaudited access. |
+| Tools return `UNAVAILABLE` with `operatorAction` "The server cannot decrypt stored mailbox credentials; check ENCRYPTION_KEY / key file" (not retryable); `/readyz` shows `key: fail` | The master key does not match the one the mailbox password was stored under (wrong or replaced key file). Restore the original key file and run `docker compose up -d`; if it is lost, RECOVERY.md "Lost master key". No IMAP login is attempted meanwhile. |
 | `FORBIDDEN` for everything | The client has no grants. **Clients -> client**. |
 | `UNKNOWN_OUTCOME` | A write may or may not have been applied; check the target folder before retrying. The server never replays writes. |
 | `STALE_REFERENCE` | The folder's UIDVALIDITY changed; search again. |
@@ -63,6 +64,6 @@ The container restarts automatically (`restart: unless-stopped`); `docker compos
 
 ## Misc
 
-- `Warning: connect.session() MemoryStore is not designed for a production environment` at startup is expected: sessions live in memory and are lost on restart (you log in again; OAuth tokens are unaffected). It is harmless for a single-owner, single-process deployment.
-- Increase log detail with `LOG_LEVEL=debug` in `.env`, then `docker compose up -d`. Secrets stay redacted.
+- `Warning: connect.session() MemoryStore is not designed for a production environment` at startup is expected: sessions live in memory and are lost on restart (you log in again after every restart or recreate; OAuth tokens are unaffected). It is harmless for a single-owner, single-process deployment.
+- Increase log detail with `LOG_LEVEL=debug` in `.env`, then `docker compose up -d` (not `restart`: that keeps the old environment). Secrets stay redacted.
 - Docker reports `unhealthy` only for failed liveness (`/healthz`). A wrong key does not make the container unhealthy on purpose; look at `/readyz`.

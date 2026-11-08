@@ -37,14 +37,14 @@ Step-by-step installation: `docs/INSTALL.md`. Upgrades and rollback: `docs/UPGRA
 | `AUDIT_RETENTION_DAYS` | no | `90` | Audit rows older than this are pruned at startup and every 24 h; `0` keeps them forever. |
 | `SIDECAR_BIN` | no | `sidecar/bin/sidecar` | Sidecar binary path. |
 | `SIDECAR_DISABLED` | no | off | `1`/`true`: v0 direct IMAP read path; debugging only. `/readyz` then reports `sidecar: disabled`. |
-| `SIDECAR_EXTRA_CA_FILE` | no | none | Extra CA bundle for IMAP TLS in the sidecar. Pair with `NODE_EXTRA_CA_CERTS` for the Node path. |
+| `SIDECAR_EXTRA_CA_FILE` | no | none | Extra CA bundle for IMAP TLS in the sidecar. Pair with `NODE_EXTRA_CA_CERTS` for the Node path. Must be a valid PEM or the sidecar exits at start. |
 | `SYNC_RECONCILE_SECS` | no | `30` | Interval of the sidecar's UID/flag reconciliation. |
 | `IDLE_RENEW_SECS` | no | `1500` | IMAP IDLE is renewed this often (providers drop IDLE at about 29-30 min). |
 | `IDLE_POLL_SECS` | no | `60` | Polling interval for servers without IDLE. |
 | `SIDECAR_FOLDER_IDLE_SECS` | no | `3600` | How long the sidecar keeps a folder's IDLE watch open after its last use before releasing it. |
 | `SIDECAR_AUTOSYNC_SECS` | no | sidecar default | Background sync interval; see `docs/DESIGN_V1.md`. |
 | `RECONNECT_INITIAL_MS`, `RECONNECT_MAX_MS`, `RECONNECT_HEALTHY_MS` | no | `1000`, `60000`, `30000` | Reconnect backoff bounds (`min(60s, 1s*2^n)` with full jitter) and the healthy period that resets it. For tests only. |
-| `NODE_EXTRA_CA_CERTS` | no | none | Node's own extra CA file (private CA for IMAP TLS on the Node path). |
+| `NODE_EXTRA_CA_CERTS` | no | none | Node's own extra CA file (private CA for IMAP TLS on the Node path). Set it together with `SIDECAR_EXTRA_CA_FILE`; with Docker via a `docker-compose.override.yml` (INSTALL.md section 7). |
 
 The compose file forwards the variables it names (see `.env.example`); to set others, add them under `environment:` in a `docker-compose.override.yml`. The sidecar does not inherit the full environment, only the variables the bridge passes on explicitly.
 
@@ -106,7 +106,7 @@ See `docs/UPGRADING.md`: automatic pre-migration backup, failed migrations abort
 | Container exits immediately with `FATAL: ...` | Missing/invalid key or `SESSION_SECRET`; the message names the variable. |
 | `/setup` returns 404 | An admin already exists. There is deliberately no reset route; the offline reset is in `docs/RECOVERY.md`. |
 | Connection test: "Host resolves to a private..." | Add the exact host name to `ALLOW_PRIVATE_HOSTS`. |
-| Connection test: "TLS certificate validation failed" | The server certificate is not trusted for that host name. Fix the certificate or, for a private CA, start the server with `NODE_EXTRA_CA_CERTS=/path/ca.pem`. Validation cannot be turned off. |
+| Connection test: "TLS certificate validation failed" | The server certificate is not trusted for that host name. Fix the certificate or, for a private CA, mount the CA PEM and set `NODE_EXTRA_CA_CERTS` and `SIDECAR_EXTRA_CA_FILE` to its path (ready-made `docker-compose.override.yml` in INSTALL.md section 7). Validation cannot be turned off. |
 | Authentication failed | Wrong password, or the provider needs an app password / IMAP enabled. |
 | All tools fail after a redeploy | Wrong or missing master key file (`/readyz` shows `key: fail`), or `BASE_URL` changed (tokens invalid -> 401 and clients re-authorize). |
 | Client gets `FORBIDDEN` on everything | No grants for that client, or the token was consented without that capability. Edit grants; for a capability beyond the token's scopes the client must authorize again. |
