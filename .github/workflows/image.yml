@@ -3,35 +3,21 @@
 name: image
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-    paths:
-      - Dockerfile
-      - .dockerignore
-      - package*.json
-      - tsconfig.json
-      - drizzle.config.ts
-      - drizzle/**
-      - src/**
-      - sidecar/**
-      - scripts/smoke.sh
-      - test/smoke/**
-      - .github/workflows/image.yml
-  pull_request:
-    paths:
-      - Dockerfile
-      - .dockerignore
-      - package*.json
-      - src/**
-      - sidecar/**
-      - test/smoke/**
-      - .github/workflows/image.yml
+  # Manual only. Run it from the Actions tab or: gh workflow run image.yml [-f push=false] [-f tag=1.2.3]
   workflow_dispatch:
+    inputs:
+      push:
+        description: "Push to GHCR (false = build + smoke test only, nothing published)"
+        type: boolean
+        default: true
+      tag:
+        description: "Extra image tag, e.g. 1.2.3 (optional; edge and sha tags are always set)"
+        type: string
+        required: false
 
 concurrency:
   group: image-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -56,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: mode
-        run: echo "push=${{ github.event_name != 'pull_request' && 'true' || 'false' }}" >> "$GITHUB_OUTPUT"
+        run: echo "push=${{ inputs.push }}" >> "$GITHUB_OUTPUT"
       - id: slug
         run: echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
         env: { PLATFORM: "${{ matrix.platform }}" }
@@ -71,7 +57,7 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE }}
-      # Push-by-digest on main/tags; PRs only build (and load for the smoke test on amd64).
+      # Push-by-digest on main/tags; push=false only builds (and loads for the smoke test).
       - name: build and push by digest
         id: build
         if: steps.mode.outputs.push == 'true'
@@ -83,7 +69,7 @@ jobs:
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ steps.slug.outputs.pair }}
           cache-to: type=gha,scope=${{ steps.slug.outputs.pair }},mode=max
-      - name: build (PR, not pushed)
+      - name: build (push=false, not published)
         if: steps.mode.outputs.push != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -142,8 +128,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=edge,branch=main
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=sha,format=short
       - name: create manifest list
         working-directory: ${{ runner.temp }}/digests
