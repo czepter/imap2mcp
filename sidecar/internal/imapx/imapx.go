@@ -163,9 +163,11 @@ type Account struct {
 	creds  Creds
 	tlsCfg func(serverName string) *tls.Config
 
-	mu     sync.Mutex
-	idle   []*conn
-	closed bool
+	mu         sync.Mutex
+	idle       []*conn
+	closed     bool
+	authFailed bool   // latched: the server rejected the credentials; no dial happens until ClearAuthFailure
+	onAuth     func() // called (once per latch) when authFailed is set
 }
 
 type conn struct {
@@ -190,11 +192,80 @@ func (a *Account) Close() {
 	a.idle = nil
 	a.mu.Unlock()
 	for _, c := range idle {
-		_ = c.c.Close()
+		closeAsync(c.c)
 	}
 }
 
+// closeAsync closes a client without ever blocking the caller (Client.Close
+// waits for the decoder goroutine).
+func closeAsync(c *imapclient.Client) { go func() { _ = c.Close() }() }
+
+// SetOnAuthFailed registers a callback invoked when the account latches.
+func (a *Account) SetOnAuthFailed(f func()) {
+	a.mu.Lock()
+	a.onAuth = f
+	a.mu.Unlock()
+}
+
+// AuthFailed reports whether the credentials were rejected (latched).
+func (a *Account) AuthFailed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.authFailed
+}
+
+// ClearAuthFailure lifts the latch so the next operation may try to log in.
+func (a *Account) ClearAuthFailure() {
+	a.mu.Lock()
+	a.authFailed = false
+	a.mu.Unlock()
+}
+
+func (a *Account) latchAuth() {
+	a.mu.Lock()
+	was := a.authFailed
+	a.authFailed = true
+	cb := a.onAuth
+	idle := a.idle
+	a.idle = nil
+	a.mu.Unlock()
+	for _, c := range idle {
+		closeAsync(c.c)
+	}
+	if !was && cb != nil {
+		cb()
+	}
+}
+
+// isAuthRejection decides whether a failed LOGIN means "bad credentials" (as
+// opposed to a temporary server-side condition).
+func isAuthRejection(err error) bool {
+	var ie *imap.Error
+	if !errors.As(err, &ie) || ie.Type != imap.StatusResponseTypeNo {
+		return false
+	}
+	switch ie.Code {
+	case imap.ResponseCodeUnavailable, imap.ResponseCodeServerBug, imap.ResponseCodeInUse,
+		imap.ResponseCodeLimit, imap.ResponseCodeOverQuota:
+		return false
+	}
+	return true
+}
+
 func (a *Account) dial(ctx context.Context) (*conn, error) {
+	cl, err := a.dialClient(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &conn{c: cl, fresh: true}, nil
+}
+
+// dialClient connects, logs in and returns the client. It refuses to contact
+// the server while the auth latch is set.
+func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
+	if a.AuthFailed() {
+		return nil, ErrAuth
+	}
 	cr := a.creds
 	if cr.IP == "" {
 		return nil, errors.New("no pinned ip for mailbox")
@@ -218,23 +289,30 @@ func (a *Account) dial(ctx context.Context) (*conn, error) {
 		return nil, fmt.Errorf("tls: %w", err)
 	}
 	cl := imapclient.New(tc, &imapclient.Options{
-		WordDecoder: &mime.WordDecoder{CharsetReader: charset.Reader},
+		WordDecoder:           &mime.WordDecoder{CharsetReader: charset.Reader},
+		UnilateralDataHandler: h,
 	})
 	stop := context.AfterFunc(ctx, func() { _ = cl.Close() })
 	defer stop()
 	if err := cl.WaitGreeting(); err != nil {
-		_ = cl.Close()
+		closeAsync(cl)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	if err := cl.Login(cr.User, cr.Pass).Wait(); err != nil {
-		_ = cl.Close()
-		var ie *imap.Error
-		if errors.As(err, &ie) && ie.Type == imap.StatusResponseTypeNo {
+		closeAsync(cl)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isAuthRejection(err) {
+			a.latchAuth()
 			return nil, ErrAuth
 		}
 		return nil, err
 	}
-	return &conn{c: cl, fresh: true}, nil
+	return cl, nil
 }
 
 func (a *Account) acquire(ctx context.Context) (*conn, bool, error) {
@@ -258,13 +336,13 @@ func (a *Account) acquire(ctx context.Context) (*conn, bool, error) {
 func (a *Account) release(c *conn, ok bool) {
 	c.fresh = false
 	if !ok {
-		_ = c.c.Close()
+		closeAsync(c.c)
 		return
 	}
 	a.mu.Lock()
-	if a.closed || len(a.idle) >= 2 {
+	if a.closed || a.authFailed || len(a.idle) >= 2 {
 		a.mu.Unlock()
-		_ = c.c.Close()
+		closeAsync(c.c)
 		return
 	}
 	a.idle = append(a.idle, c)
@@ -281,16 +359,36 @@ func (a *Account) Verify(ctx context.Context) error {
 	return nil
 }
 
-// with runs fn on a pooled connection. A connection error on a reused
-// connection is retried once on a fresh one (all operations are read-only).
+// with runs fn on a pooled connection. Errors are NOT retried here: the Node
+// layer owns read retries (see below).
+// fn runs in its own goroutine and ctx is enforced by watching it from the
+// outside: when the deadline passes, the connection is closed and with
+// returns ctx.Err() even if fn (a library call) is wedged. Callers must not
+// read fn's outputs after an error.
 func (a *Account) with(ctx context.Context, fn func(c *imapclient.Client) error) error {
-	for attempt := 0; ; attempt++ {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		c, reused, err := a.acquire(ctx)
 		if err != nil {
 			return err
 		}
-		stop := context.AfterFunc(ctx, func() { _ = c.c.Close() })
-		err = fn(c.c)
+		stop := context.AfterFunc(ctx, func() { closeAsync(c.c) })
+		done := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					done <- errors.New("internal error in imap operation")
+				}
+			}()
+			done <- fn(c.c)
+		}()
+		select {
+		case err = <-done:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 		stop()
 		if ctx.Err() != nil {
 			a.release(c, false)
@@ -299,9 +397,9 @@ func (a *Account) with(ctx context.Context, fn func(c *imapclient.Client) error)
 		var ie *imap.Error
 		protocolOnly := err == nil || errors.As(err, &ie)
 		a.release(c, protocolOnly)
-		if err != nil && !protocolOnly && reused && attempt == 0 {
-			continue
-		}
+		// No internal retry: reads are retried at exactly one layer (the Node tool wrapper, at most 2 retries,
+		// docs/DESIGN_V2.md "Retries"), so a persistently failing fetch costs 1+2 upstream attempts, not more.
+		_ = reused
 		return err
 	}
 }
@@ -327,7 +425,10 @@ func (a *Account) ListFolders(ctx context.Context) ([]Folder, error) {
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Status runs STATUS (UIDVALIDITY UIDNEXT MESSAGES).
@@ -344,7 +445,10 @@ func (a *Account) Status(ctx context.Context, folder string) (Status, error) {
 		}
 		return nil
 	})
-	return st, err
+	if err != nil {
+		return Status{}, err
+	}
+	return st, nil
 }
 
 // Selected is the state observed when a folder is examined.
@@ -400,7 +504,10 @@ func (a *Account) SearchAll(ctx context.Context, folder string) (Selected, []uin
 		uids = numsOf(d.All)
 		return nil
 	})
-	return sel, uids, err
+	if err != nil {
+		return Selected{}, nil, err
+	}
+	return sel, uids, nil
 }
 
 // SearchText runs UID SEARCH TEXT <text>.
@@ -419,7 +526,10 @@ func (a *Account) SearchText(ctx context.Context, folder, text string) (Selected
 		uids = numsOf(d.All)
 		return nil
 	})
-	return sel, uids, err
+	if err != nil {
+		return Selected{}, nil, err
+	}
+	return sel, uids, nil
 }
 
 // FetchHeaders runs UID FETCH <set> (UID FLAGS ENVELOPE RFC822.SIZE INTERNALDATE).
@@ -456,7 +566,10 @@ func (a *Account) FetchHeaders(ctx context.Context, folder string, uids []uint32
 		}
 		return nil
 	})
-	return sel, out, err
+	if err != nil {
+		return Selected{}, nil, err
+	}
+	return sel, out, nil
 }
 
 func headerOf(m *imapclient.FetchMessageBuffer) Header {
@@ -516,7 +629,10 @@ func (a *Account) FetchFlags(ctx context.Context, folder string, uids []uint32) 
 		}
 		return nil
 	})
-	return sel, out, err
+	if err != nil {
+		return Selected{}, nil, err
+	}
+	return sel, out, nil
 }
 
 // RawBody is a (possibly truncated) raw RFC 5322 message.
@@ -560,5 +676,8 @@ func (a *Account) FetchRaw(ctx context.Context, folder string, uid uint32, max i
 		}
 		return nil
 	})
-	return rb, err
+	if err != nil {
+		return RawBody{}, err
+	}
+	return rb, nil
 }

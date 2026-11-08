@@ -11,11 +11,17 @@ export interface AuditNote {
   uidValidity?: number;
   /** Exact UIDs returned/affected (multi-message reads/searches record the full returned set). */
   uids?: number[];
+  /** Per-hit folders for multi-folder results (search across folders); stored in place of the flat uid list. */
+  refs?: AuditRef[];
+  /** True only when the call was refused by policy (incl. a policy-masked NOT_FOUND). A genuine miss leaves it unset. */
+  denied?: boolean;
   /** Served from the sidecar's in-memory cache (no upstream round trip for this data). */
   cached?: boolean;
   /** Set when a write was reconciled against server state after an ambiguous failure. */
   reconciled?: boolean;
 }
+
+export interface AuditRef { folder: string; uidValidity: number; uids: number[] }
 
 export interface AuditScope {
   requestId: string;
@@ -33,9 +39,10 @@ export function auditNote(patch: AuditNote): void {
   const s = als.getStore();
   if (!s) return;
   const n = s.note;
+  if (patch.refs) n.refs = [...(n.refs ?? []), ...patch.refs];
   if (patch.uids) n.uids = [...(n.uids ?? []), ...patch.uids];
   if (patch.cached !== undefined) n.cached = (n.cached ?? true) && patch.cached; // cached only if ALL data was
-  const { uids: _u, cached: _c, ...rest } = patch;
+  const { uids: _u, cached: _c, refs: _r, ...rest } = patch;
   Object.assign(n, rest);
 }
 

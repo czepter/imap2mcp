@@ -11,6 +11,8 @@ import { layout, card, type NavKey } from "./views/layout.js";
 import { escapeHtml as esc } from "./views/escapeHtml.js";
 import { CAPABILITIES, validRedirectUri, scopesToCaps } from "../oauth/common.js";
 import type { Capability } from "../types.js";
+import { clearMailboxAuthFailure } from "../imap/client.js";
+import { retryMailbox } from "../sidecar/index.js";
 import { capabilityRows, OPERATIONS, OP_CAPABILITY, PRESET_OPS, grantPreset, isOperation, isValidSelector, listRules, presetActive, revokePreset, setRule } from "../policy/rules.js";
 
 const router = Router();
@@ -34,6 +36,26 @@ const str = (v: unknown, max = 500) => (typeof v === "string" ? v.trim().slice(0
 const send = (res: Response, title: string, body: string, active?: NavKey) => res.send(layout(title, body, "admin", active));
 const pill = (cap: string) => `<span class="pill ${esc(cap)}">${esc(cap)}</span>`;
 const when = (iso: string) => esc(iso.replace("T", " ").slice(0, 16)) + " UTC";
+
+// ---- mailbox connection status (v2) ----
+interface MbStatus { status: string; last_error_code: string | null; last_ok_at: string | null; next_retry_at: string | null }
+function mailboxStatus(id: string): MbStatus {
+  try {
+    return (getDb().prepare("SELECT status, last_error_code, last_ok_at, next_retry_at FROM mailboxes WHERE id = ?").get(id) as MbStatus | undefined)
+      ?? { status: "unknown", last_error_code: null, last_ok_at: null, next_retry_at: null };
+  } catch { return { status: "unknown", last_error_code: null, last_ok_at: null, next_retry_at: null }; }
+}
+const statusBadge = (st: string) => {
+  const cls = st === "ok" ? "ok" : st === "auth_failed" ? "off" : st === "degraded" ? "warn" : "read";
+  const text = st === "auth_failed" ? "auth failed" : st;
+  return `<span class="pill ${cls}">${esc(text)}</span>`;
+};
+/** Resets status to 'unknown' and clears the in-process auth-failure latch (sidecar retry is handled by workstream K's poller). */
+async function resetMailboxStatus(id: string): Promise<void> {
+  getDb().prepare("UPDATE mailboxes SET status = 'unknown', last_error_code = NULL, next_retry_at = NULL WHERE id = ?").run(id);
+  clearMailboxAuthFailure(id); // Node pool latch
+  await retryMailbox(id); // sidecar latch (never throws)
+}
 const reRaw = (v: string) => v.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 
 // ---------------- Dashboard ----------------
@@ -69,7 +91,7 @@ router.get("/dashboard", (req, res) => {
     : `<p class="pad sub">${mailboxes.length ? "No clients registered yet." : "Add a mailbox first, then connect a client."}</p>`;
 
   const clientCount = (mid: string) => new Set(grantRows.filter((g) => g.mailbox_id === mid).map((g) => g.client_id)).size;
-  const mbRows = mailboxes.map((m) => `<tr><td><b>${esc(m.label)}</b></td><td class="mono">${esc(m.imap_host)}:${m.imap_port}</td><td>${esc(m.imap_username)}</td>
+  const mbRows = mailboxes.map((m) => `<tr><td><b>${esc(m.label)}</b></td><td class="mono">${esc(m.imap_host)}:${m.imap_port}</td><td>${esc(m.imap_username)}</td><td>${statusBadge(mailboxStatus(m.id).status)}</td>
     <td>${m.drafts_folder ? esc(m.drafts_folder) : '<span class="pill warn">not set</span>'}</td><td>${clientCount(m.id) || '<span class="none">0</span>'}</td><td class="r"><a class="btn s" href="/mailboxes/${esc(m.id)}">Manage</a></td></tr>`).join("");
 
   const mbLabel = new Map(mailboxes.map((m) => [m.id, m.label]));
@@ -95,7 +117,7 @@ router.get("/dashboard", (req, res) => {
   ${flash(req)}${warn}
   ${card("clients", "Access map", map + addClient, { aside: `<span class="sub">Blank means no access. ${pill("draft")} ${pill("organize")} change things.${config.registrationMode === "admin" ? "" : " Clients register themselves; registration grants nothing."}</span>` })}
   ${card("mailboxes", "Mailboxes", mailboxes.length
-    ? `<div class="scroll"><table><thead><tr><th scope="col">Label</th><th scope="col">Server</th><th scope="col">User</th><th scope="col">Drafts folder</th><th scope="col">Clients</th><th></th></tr></thead><tbody>${mbRows}</tbody></table></div>`
+    ? `<div class="scroll"><table><thead><tr><th scope="col">Label</th><th scope="col">Server</th><th scope="col">User</th><th scope="col">Status</th><th scope="col">Drafts folder</th><th scope="col">Clients</th><th></th></tr></thead><tbody>${mbRows}</tbody></table></div>`
     : `<p class="pad sub">No mailboxes yet.</p>`, { aside: `<a class="btn p s" href="/mailboxes/new">Add mailbox</a>` })}
   ${card("tokens", "Active tokens", tokens.length
     ? `<div class="scroll"><table><thead><tr><th scope="col">Client</th><th scope="col">Can reach</th><th scope="col">Issued</th><th scope="col">Access token expires</th><th></th></tr></thead><tbody>${tkRows}</tbody></table></div>`
@@ -130,6 +152,18 @@ router.post("/mailboxes", (req, res) => {
   back(res, `/mailboxes/${m.id}`, "msg", "Mailbox saved. Run the connection test, then choose the Drafts folder.");
 });
 
+function statusBanner(req: Request, id: string): string {
+  const st = mailboxStatus(id);
+  const retry = post(req, `/mailboxes/${id}/retry`, "Retry", "s");
+  if (st.status === "auth_failed") {
+    return `<div class="error" role="alert"><span><b>Authentication failed.</b> The mail server rejected this mailbox's credentials, so the bridge stopped trying. Update the password below, or press Retry once it is fixed at the provider.${st.last_error_code ? ` <span class="mono">${esc(st.last_error_code)}</span>` : ""}</span>${retry}</div>`;
+  }
+  if (st.status === "degraded") {
+    return `<div class="alert warn" role="status"><span><b>Degraded.</b> The connection is unstable${st.last_error_code ? ` (<span class="mono">${esc(st.last_error_code)}</span>)` : ""}${st.next_retry_at ? `; next attempt ${when(st.next_retry_at)}` : ""}.</span>${retry}</div>`;
+  }
+  return `<p class="small" style="margin-bottom:14px">Connection status: ${statusBadge(st.status)}${st.last_ok_at ? ` \u00b7 last OK ${when(st.last_ok_at)}` : ""}</p>`;
+}
+
 function renderMailbox(req: Request, res: Response, id: string, test?: { ok: boolean; message: string; folders: string[] }) {
   const m = getMailbox(id);
   if (!m) return res.status(404).send(layout("Not found", `<div class="card"><div class="pad"><h2>Mailbox not found</h2><a href="/dashboard">Back</a></div></div>`, "admin", "mailboxes"));
@@ -149,7 +183,7 @@ function renderMailbox(req: Request, res: Response, id: string, test?: { ok: boo
       : `<p class="hint">Run the connection test to choose the Drafts folder from the server's folder list.</p>`}</form>`;
   send(res, m.label, `<div class="crumb"><a href="/dashboard#mailboxes">Mailboxes</a> / ${esc(m.label)}</div>
   <div class="head"><div><h1>${esc(m.label)}</h1><p class="mono">${esc(m.imap_username)} \u00b7 ${esc(m.imap_host)}:${m.imap_port}</p></div>${post(req, `/mailboxes/${m.id}/test`, "Test connection")}</div>
-  ${flash(req)}${test ? `<div class="${test.ok ? "success" : "error"}" role="status"><span>${esc(test.message)}</span></div>` : ""}
+  ${flash(req)}${statusBanner(req, m.id)}${test ? `<div class="${test.ok ? "success" : "error"}" role="status"><span>${esc(test.message)}</span></div>` : ""}
   ${card("conn", "Connection", mailboxForm(req, { action: `/mailboxes/${m.id}`, m, edit: true }))}
   ${card("drafts", "Drafts folder", folderForm, { aside: m.drafts_folder ? `<span class="sub">Current: <b>${esc(m.drafts_folder)}</b></span>` : `<span class="pill warn">not set</span>` })}
   ${card("reach", "Who can reach this mailbox", reach)}
@@ -162,13 +196,20 @@ function renderMailbox(req: Request, res: Response, id: string, test?: { ok: boo
 
 router.get("/mailboxes/:id", (req, res) => renderMailbox(req, res, req.params.id));
 
-router.post("/mailboxes/:id", (req, res) => {
+router.post("/mailboxes/:id", async (req, res) => {
   const id = req.params.id;
   const i = { label: str(req.body.label, 100), host: str(req.body.host, 253), port: parseInt(str(req.body.port, 6), 10), username: str(req.body.username, 320), password: typeof req.body.password === "string" ? req.body.password : "" };
   const bad = validateMailboxInput(i, false);
   if (bad) return back(res, `/mailboxes/${id}`, "err", bad);
   if (!updateMailbox(id, i)) return res.status(404).send("Not found");
+  if (i.password) await resetMailboxStatus(id); // new credentials: resume automatic attempts (both latches)
   back(res, `/mailboxes/${id}`, "msg", "Saved. If host, port or username changed, re-test and re-select the Drafts folder.");
+});
+
+router.post("/mailboxes/:id/retry", async (req, res) => {
+  if (!getMailbox(req.params.id)) return res.status(404).send("Not found");
+  await resetMailboxStatus(req.params.id);
+  back(res, `/mailboxes/${req.params.id}`, "msg", "Status reset. The bridge will try to connect again on the next request.");
 });
 
 router.post("/mailboxes/:id/test", async (req, res) => {

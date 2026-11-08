@@ -374,3 +374,100 @@ func TestShortSecretRejected(t *testing.T) {
 		t.Fatal("short secret accepted")
 	}
 }
+
+func statusOf(t *testing.T, c *rpcClient, id string) map[string]any {
+	t.Helper()
+	r := c.call("status", map[string]any{"mailboxId": id})
+	if r.Error != nil {
+		t.Fatalf("status: %+v", r.Error)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(r.Result, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestStatusAndRetryRPC(t *testing.T) {
+	h := newHarness(t, 0)
+	c := h.dial()
+	if st := statusOf(t, c, "ghost"); st["state"] != "closed" {
+		t.Fatalf("unknown mailbox: %v", st)
+	}
+	if r := h.open(c, "m1"); r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	st := statusOf(t, c, "m1")
+	if st["state"] != "connected" || st["idle"] == nil || st["reconnects"] == nil || st["since"] == "" {
+		t.Fatalf("connected status: %v", st)
+	}
+	for _, k := range []string{"lastErrorCode", "nextRetryAt"} {
+		if _, ok := st[k]; ok {
+			t.Fatalf("%s present while healthy: %v", k, st)
+		}
+	}
+	// credentials revoked: the watcher's reconnect is rejected => latch
+	h.srv.SetRejectLogin(true)
+	h.srv.DropAll()
+	deadline := time.Now().Add(15 * time.Second)
+	for statusOf(t, c, "m1")["state"] != "auth_failed" {
+		if time.Now().After(deadline) {
+			t.Fatalf("never latched: %v", statusOf(t, c, "m1"))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if st := statusOf(t, c, "m1"); st["lastErrorCode"] != "AUTH_FAILED" {
+		t.Fatalf("%v", st)
+	}
+	n := h.srv.LoginFailures()
+	time.Sleep(2500 * time.Millisecond)
+	if h.srv.LoginFailures() != n {
+		t.Fatal("login attempts continued while latched (default timers)")
+	}
+	h.srv.SetRejectLogin(false)
+	if r := c.call("retry", map[string]any{"mailboxId": "m1"}); r.Error != nil || !strings.Contains(string(r.Result), "true") {
+		t.Fatalf("retry: %+v", r)
+	}
+	if r := c.call("retry", map[string]any{"mailboxId": "never-opened"}); r.Error != nil {
+		t.Fatalf("retry of unknown mailbox should be a no-op: %+v", r)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for statusOf(t, c, "m1")["state"] != "connected" {
+		if time.Now().After(deadline) {
+			t.Fatalf("not connected after retry: %v", statusOf(t, c, "m1"))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// log lines never carry credentials
+	if strings.Contains(h.logs.String(), testimap.Pass) || strings.Contains(h.logs.String(), testimap.User) {
+		t.Fatalf("logs leak credentials:\n%s", h.logs.String())
+	}
+}
+
+func TestHungUpstreamAnsweredAtDeadline(t *testing.T) {
+	h := newHarness(t, 700*time.Millisecond)
+	for i := 1; i <= 10; i++ {
+		h.srv.Append("INBOX", testimap.Msg(i, "s", "Bob <bob@example.org>", "alice@example.test", 100))
+	}
+	c := h.dial()
+	if r := h.open(c, "m1"); r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	if r := c.call("sync", map[string]any{"mailboxId": "m1", "folder": "INBOX", "mode": "auto"}); r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	h.srv.SetHang(true)
+	start := time.Now()
+	r := c.call("sync", map[string]any{"mailboxId": "m1", "folder": "INBOX", "mode": "full"})
+	if r.Error == nil || r.Error.Code != engine.CodeTimeout || time.Since(start) > 3*time.Second {
+		t.Fatalf("want -32030 within the deadline, got %+v after %s", r, time.Since(start))
+	}
+	// the connection and the server stay usable while upstream is wedged
+	if r := c.call("ping", nil); r.Error != nil {
+		t.Fatalf("ping while hung: %+v", r)
+	}
+	h.srv.SetHang(false)
+	if r := c.call("sync", map[string]any{"mailboxId": "m1", "folder": "INBOX", "mode": "full"}); r.Error != nil {
+		t.Fatalf("after unhang: %+v", r.Error)
+	}
+}

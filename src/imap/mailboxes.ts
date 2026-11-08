@@ -3,6 +3,8 @@ import { ImapFlow } from "imapflow";
 import { getDb } from "../db/database.js";
 import { encrypt, decrypt } from "./crypto.js";
 import { assertHostAllowed } from "./ssrf.js";
+import { clearMailboxAuthFailure } from "./client.js";
+import { retryMailbox } from "../sidecar/index.js";
 
 export interface Mailbox {
   id: string;
@@ -70,6 +72,11 @@ export function updateMailbox(id: string, i: Omit<MailboxInput, "password"> & { 
       .run(i.label, i.host.trim(), i.port, i.username, changedTarget ? 1 : 0, id);
     if (i.password) db.prepare("UPDATE mailboxes SET imap_password_enc = ? WHERE id = ?").run(encrypt(i.password, aad(id)), id);
   })();
+  if (i.password || changedTarget) {
+    // New credentials/target: clear BOTH auth-failure latches (Node pool + sidecar) so attempts resume. Never throws.
+    clearMailboxAuthFailure(id);
+    void retryMailbox(id);
+  }
   return true;
 }
 

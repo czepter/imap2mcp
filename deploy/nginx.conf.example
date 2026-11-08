@@ -1,0 +1,43 @@
+# nginx >= 1.18. Put in /etc/nginx/conf.d/imap2mcp.conf. Certificates: certbot, acme.sh or your own.
+# Replace mcp.example.com with the host part of BASE_URL and adjust the certificate paths.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name mcp.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;                      # nginx >= 1.25.1; on older versions use "listen 443 ssl http2;"
+    server_name mcp.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    client_max_body_size 2m;       # the app limits JSON/form bodies to 1 MB
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        # The app trusts exactly ONE proxy hop (express "trust proxy" = 1) when BASE_URL is https.
+        # Overwrite, never append, so a client cannot inject its own forwarding headers.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Streamable HTTP / SSE: no buffering, no caching, long-lived responses.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Connection "";
+        add_header X-Accel-Buffering no always;
+    }
+}

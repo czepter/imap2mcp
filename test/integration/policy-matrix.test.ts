@@ -85,7 +85,10 @@ describe.skipIf(!haveOpenssl)("policy: default deny and the client x mailbox x c
     const c = await new Mcp(s.base, tokens.access_token).connect();
     const ghost = await c.call("list_folders", { mailbox: "00000000-0000-0000-0000-000000000000" });
     const other = await c.call("list_folders", { mailbox: M[B] });
-    expect(ghost.data).toEqual(other.data);
+    // requestId is unique per call by design (v2); everything else must be identical
+    const { requestId: _g, ...ghostRest } = ghost.data;
+    const { requestId: _o, ...otherRest } = other.data;
+    expect(ghostRest).toEqual(otherRest);
     expect(ghost.data.code).toBe("FORBIDDEN");
     await c.close();
   });

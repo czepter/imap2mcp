@@ -58,7 +58,7 @@ export interface Stack {
 
 export const ACCOUNTS = ["alice@example.test", "bob@example.test"];
 
-export async function createStack(o: { accounts?: string[]; move?: boolean; skipMailboxes?: boolean; noCa?: boolean; env?: Record<string, string | undefined> } = {}): Promise<Stack> {
+export async function createStack(o: { accounts?: string[]; move?: boolean; skipMailboxes?: boolean; noCa?: boolean; env?: Record<string, string | undefined>; /** configure the fake IMAP server before it starts listening (v2 fault knobs) */ fake?: (f: FakeImapServer) => void } = {}): Promise<Stack> {
   const cert = makeSelfSignedCert();
   if (!cert) throw new Error("openssl unavailable");
   const accounts = o.accounts ?? ACCOUNTS;
@@ -68,6 +68,7 @@ export async function createStack(o: { accounts?: string[]; move?: boolean; skip
     imapPasswords[a] = "ImapPw-" + randomBytes(9).toString("hex");
     fake.addAccount(a, imapPasswords[a]);
   }
+  o.fake?.(fake);
   await fake.start();
   const work = makeWorkdir();
   const srv = await startServer({ work, caFile: o.noCa ? undefined : cert.certPath, env: o.env });

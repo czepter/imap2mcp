@@ -207,16 +207,35 @@ func (s *Server) handleConn(c net.Conn) {
 
 func (s *Server) dispatch(req request) (resp response) {
 	resp.ID = req.ID
-	defer func() {
-		if r := recover(); r != nil {
-			s.cfg.Logf("panic in %s", req.Method) // value deliberately not logged (may contain params)
-			resp.Result = nil
-			resp.Error = &rpcError{engine.CodeUpstream, "internal error"}
-		}
-	}()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.RequestTimeout)
 	defer cancel()
-	res, err := s.call(ctx, req.Method, req.Params)
+	// The handler runs in its own goroutine and the deadline is enforced from
+	// the outside: even a wedged upstream call cannot keep the caller waiting
+	// past RequestTimeout (its context is cancelled and abandoned work ends
+	// when its connection is closed).
+	type outcome struct {
+		res any
+		err error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.cfg.Logf("panic in %s", req.Method) // value deliberately not logged (may contain params)
+				ch <- outcome{err: &engine.Error{Code: engine.CodeUpstream, Msg: "internal error"}}
+			}
+		}()
+		res, err := s.call(ctx, req.Method, req.Params)
+		ch <- outcome{res, err}
+	}()
+	var res any
+	var err error
+	select {
+	case o := <-ch:
+		res, err = o.res, o.err
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
 	if err != nil {
 		var ee *engine.Error
 		if errors.As(err, &ee) {
@@ -374,6 +393,23 @@ func (s *Server) call(ctx context.Context, method string, raw json.RawMessage) (
 			return nil, err
 		}
 		s.eng.Close(p.MailboxID)
+		return map[string]any{"ok": true}, nil
+	case "status":
+		var p struct {
+			MailboxID string `json:"mailboxId"`
+		}
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		return s.eng.Status(p.MailboxID), nil
+	case "retry":
+		var p struct {
+			MailboxID string `json:"mailboxId"`
+		}
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		s.eng.Retry(p.MailboxID)
 		return map[string]any{"ok": true}, nil
 	case "invalidate":
 		var p struct {

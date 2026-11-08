@@ -95,7 +95,8 @@ describe.skipIf(!ok)("v1 policy end to end", () => {
       expect(s.fake.commands.filter((x) => x.user === ALICE && (x.selected === "Archive" || /Archive/.test(x.line)))).toEqual([]);
     });
 
-    const norm = (t: string, f: string) => t.split(f).join("<F>");
+    // requestId is unique per call by design (v2); every other byte of the payload must be identical.
+    const norm = (t: string, f: string) => t.replace(/"requestId":"[^"]*"/, '"requestId":"<R>"').split(f).join("<F>");
     it("an explicit search of a denied folder gives the same answer as a folder that does not exist", async () => {
       const c = await mk(leakRules);
       const denied = await c.mcp.call("search_messages", { mailbox: box, folder: "Archive", subject: "zebra" });

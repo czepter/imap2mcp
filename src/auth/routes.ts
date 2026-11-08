@@ -5,6 +5,7 @@ import { hashPassword, verifyPassword } from "./password.js";
 import { adminExists, safeReturnTo } from "./admin.js";
 import { csrfField, createRateLimiter } from "../security/index.js";
 import { config } from "../config.js";
+import { banner, log } from "../log.js";
 import { shell, logo } from "../web/views/layout.js";
 
 const router = Router();
@@ -16,11 +17,14 @@ let bootstrapToken: string | undefined;
 export function initBootstrap(): void {
   if (adminExists()) return;
   bootstrapToken = config.adminBootstrapToken || randomBytes(24).toString("base64url");
-  console.log("========================================");
-  console.log("  First run: no admin configured.");
-  console.log(`  Open ${config.baseUrl}/setup and enter this one-time bootstrap token:`);
-  console.log(`  ${bootstrapToken}`);
-  console.log("========================================");
+  log.info("first run: no admin configured; setup code printed to stdout");
+  banner([ // intentionally plain text and unredacted: the operator must copy the one-time code
+    "========================================",
+    "  First run: no admin configured.",
+    `  Open ${config.baseUrl}/setup and enter this one-time bootstrap token:`,
+    `  ${bootstrapToken}`,
+    "========================================",
+  ]);
 }
 
 function esc(s: string): string {

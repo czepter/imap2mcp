@@ -1,6 +1,7 @@
 import { sidecarEnabled } from "../sidecar/index.js";
 import { directBackend } from "./backend-direct.js";
 import { sidecarBackend } from "./backend-sidecar.js";
+import { reliableBackend } from "./reliability.js";
 
 export interface Addr { name?: string; address?: string }
 
@@ -33,6 +34,10 @@ export interface ReadBackend {
   fetchBody(mailbox: string, folder: string, uidValidity: number, uid: number, maxBytes: number): Promise<BodyResult>;
 }
 
+const reliableSidecar = reliableBackend(sidecarBackend);
+const reliableDirect = reliableBackend(directBackend, new Set());
+
+/** The active read backend wrapped with the v2 read policy (30 s budget, bounded jittered retries, auth latch, audit notes). */
 export function getBackend(): ReadBackend {
-  return sidecarEnabled() ? sidecarBackend : directBackend;
+  return sidecarEnabled() ? reliableSidecar : reliableDirect;
 }

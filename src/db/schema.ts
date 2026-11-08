@@ -22,6 +22,11 @@ export const mailboxes = sqliteTable("mailboxes", {
   imapPasswordEnc: text("imap_password_enc").notNull(), // v1:... format
   draftsFolder: text("drafts_folder"),
   createdAt: text("created_at").notNull().default(now),
+  // v2: connection health (unknown|ok|degraded|auth_failed)
+  status: text("status").notNull().default("unknown"),
+  lastErrorCode: text("last_error_code"),
+  lastOkAt: text("last_ok_at"),
+  nextRetryAt: text("next_retry_at"),
 });
 
 export const oauthClients = sqliteTable("oauth_clients", {
@@ -77,3 +82,33 @@ export const oauthTokens = sqliteTable("oauth_tokens", {
   revoked: integer("revoked").notNull().default(0),
   createdAt: text("created_at").notNull().default(now),
 });
+
+export const AUDIT_OUTCOMES = ["ok", "denied", "failed", "unknown_outcome"] as const;
+
+/** v2 access audit. Never holds bodies, headers, subjects, addresses, tokens or credentials. */
+export const auditEvents = sqliteTable(
+  "audit_events",
+  {
+    id: text("id").primaryKey(),
+    ts: text("ts").notNull(),
+    requestId: text("request_id").notNull(),
+    clientId: text("client_id"),
+    mailboxId: text("mailbox_id"),
+    folder: text("folder"),
+    uidValidity: integer("uid_validity"),
+    uid: integer("uid"),
+    uids: text("uids"),
+    uidsTruncated: integer("uids_truncated").notNull().default(0),
+    tool: text("tool").notNull(),
+    outcome: text("outcome").notNull(),
+    errorCode: text("error_code"),
+    cached: integer("cached").notNull().default(0),
+    reconciled: integer("reconciled").notNull().default(0),
+    durationMs: integer("duration_ms"),
+  },
+  (t) => [
+    index("audit_ts").on(t.ts),
+    index("audit_client").on(t.clientId, t.ts),
+    check("audit_events_outcome", sql`${t.outcome} IN ('ok','denied','failed','unknown_outcome')`),
+  ]
+);

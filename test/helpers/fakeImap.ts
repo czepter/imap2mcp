@@ -39,6 +39,36 @@ export interface LoggedCommand {
   user: string | null;
   selected: string | null;
   line: string; // literal payloads elided
+  ts?: number;
+}
+
+// ---------------------------------------------------------------- v2 fault injection types
+export type FaultSpec =
+  /** hold the command for `ms`, then process it normally */
+  | { kind: "delay"; ms: number }
+  /** receive the command and never answer (accept-then-stall at command level) */
+  | { kind: "hang" }
+  /** close the TCP connection right after RECEIVING the command; it is NOT applied */
+  | { kind: "drop" }
+  /** APPLY the command, then close the connection before any response bytes are sent (the classic ambiguous write) */
+  | { kind: "drop-after-apply" }
+  /** apply the command, send only the first `bytes` of the response, then close */
+  | { kind: "drop-mid-response"; bytes: number }
+  /** answer with syntactically broken data (default) followed by nothing useful; `{tag}` is substituted */
+  | { kind: "malformed"; raw?: string }
+  /** answer with this tagged text, e.g. "NO [OVERQUOTA] mailbox full" (command is NOT applied) */
+  | { kind: "reply"; text: string };
+export interface FaultHandle {
+  /** how many times the fault fired */
+  readonly hits: number;
+  remove(): void;
+}
+export interface IdleSession {
+  user: string;
+  folder: string;
+  start: number;
+  end?: number;
+  endedBy?: "done" | "drop" | "timeout" | "close";
 }
 
 type Tok = string | Buffer | Tok[];
@@ -50,6 +80,30 @@ export class FakeImapServer {
   fetchStats = new Map<string, Map<number, FetchStat>>();
   /** Artificial one-way-ish delay: every response batch is held back this long (== injected RTT per round trip). */
   latencyMs = 0;
+  // ---- v2 fault knobs (all default off)
+  /** true / predicate => LOGIN and AUTHENTICATE are rejected with `loginRejectText` */
+  rejectLogins: boolean | ((user: string) => boolean) = false;
+  loginRejectText = "NO [AUTHENTICATIONFAILED] bad credentials";
+  /** delay (ms) before answering a LOGIN / AUTHENTICATE; may be a function so a test can open the window only after some event */
+  loginDelay: number | (() => number) = 0;
+  /** every LOGIN / AUTHENTICATE attempt, in order, with wall-clock time */
+  loginAttempts: Array<{ ts: number; user: string; ok: boolean }> = [];
+  /** every accepted TCP+TLS connection (incl. refused ones) */
+  connectLog: Array<{ ts: number; refused: boolean }> = [];
+  /** accept the connection, then drop it at once (network flaps; each attempt is still visible in connectLog) */
+  refuseConnections = false;
+  /** accept and never send the greeting */
+  stallGreeting = false;
+  /** advertise IDLE and implement it (off by default: imapflow would auto-IDLE on the Node write path) */
+  idleCap = false;
+  /** server-side IDLE limit: an IDLE not terminated within this many ms gets `* BYE` and is closed (0 = none) */
+  idleMaxMs = 0;
+  /** server-side inactivity auto-logout (any connection, reset by every received byte; 0 = none) */
+  autoLogoutMs = 0;
+  idleSessions: IdleSession[] = [];
+  autoLogouts = 0;
+  private faults: Array<{ match: (line: string, user: string | null, selected: string | null) => boolean; spec: FaultSpec; left: number; hits: number }> = [];
+  private idleLive = new Set<{ sess: IdleSession; sock: import("node:net").Socket; write: (s: string | Buffer) => unknown; timer?: NodeJS.Timeout }>();
   private holds: Array<{ pred: (line: string, user: string | null, selected: string | null) => boolean; arrived: () => void; released: Promise<void> }> = [];
   private server!: tls.Server;
   private sockets = new Set<import("node:net").Socket>();
@@ -58,11 +112,57 @@ export class FakeImapServer {
   constructor(private opts: { key: string; cert: string; move?: boolean }) {}
 
   private caps(): string {
-    return `IMAP4rev1 UIDPLUS ${this.opts.move === false ? "" : "MOVE "}ID NAMESPACE AUTH=PLAIN`.replace("  ", " ");
+    return `IMAP4rev1 UIDPLUS ${this.opts.move === false ? "" : "MOVE "}${this.idleCap ? "IDLE " : ""}ID NAMESPACE AUTH=PLAIN`.replace("  ", " ");
   }
   /** Kill every open connection (simulates server restart; clients must reconnect and re-SELECT). */
   dropConnections(): void {
     for (const s of this.sockets) s.destroy();
+  }
+
+  /** Destroy only connections that are currently in IDLE (simulates an IDLE-specific drop). */
+  dropIdleConnections(): number {
+    let n = 0;
+    for (const l of [...this.idleLive]) {
+      l.sess.endedBy = "drop";
+      l.sock.destroy();
+      n++;
+    }
+    return n;
+  }
+  /** Push untagged data to every connection IDLEing on (user, folder). */
+  notifyIdle(user: string, folder: string, kind: "exists" | "expunge" = "exists"): number {
+    const f = this.accounts.get(user)?.folders.get(folder);
+    if (!f) return 0;
+    let n = 0;
+    for (const l of this.idleLive) {
+      if (l.sess.user === user && l.sess.folder === folder) {
+        l.write(kind === "exists" ? `* ${f.messages.length} EXISTS\r\n` : `* ${Math.max(1, f.messages.length)} EXPUNGE\r\n`);
+        n++;
+      }
+    }
+    return n;
+  }
+  activeIdle(user?: string, folder?: string): number {
+    return [...this.idleLive].filter((l) => (!user || l.sess.user === user) && (!folder || l.sess.folder === folder)).length;
+  }
+  /**
+   * Inject a fault for commands whose text (without tag, e.g. `UID FETCH 5 (BODY.PEEK[])`, literals elided) matches.
+   * Fires `times` times (default 1; Infinity = until removed). First matching live fault wins.
+   */
+  inject(match: RegExp | ((line: string, user: string | null, selected: string | null) => boolean), spec: FaultSpec, times = 1): FaultHandle {
+    const f = { match: match instanceof RegExp ? (l: string) => match.test(l) : match, spec, left: times, hits: 0 };
+    this.faults.push(f);
+    return { get hits() { return f.hits; }, remove: () => { f.left = 0; } };
+  }
+  clearFaults(): void {
+    this.faults = [];
+  }
+  /** all logged commands (any user, incl. pre-login) matching `re` */
+  countAll(re: RegExp): number {
+    return this.commands.filter((c) => re.test(c.line)).length;
+  }
+  loginAttemptsSince(ts: number, user?: string): number {
+    return this.loginAttempts.filter((a) => a.ts >= ts && (!user || a.user === user)).length;
   }
 
   async start(): Promise<void> {
@@ -213,10 +313,33 @@ export class FakeImapServer {
 
   // ---------------------------------------------------------------- connection handling
   private onConn(sock: tls.TLSSocket) {
+    this.connectLog.push({ ts: Date.now(), refused: this.refuseConnections });
     this.sockets.add(sock);
     sock.on("close", () => this.sockets.delete(sock));
     sock.on("error", () => {});
-    const st: { user: string | null; acct: FakeAccount | null; sel: FakeFolder | null } = { user: null, acct: null, sel: null };
+    if (this.refuseConnections) {
+      sock.destroy();
+      return;
+    }
+    const st: { user: string | null; acct: FakeAccount | null; sel: FakeFolder | null; idle?: { tag: string; live: any } | null } = { user: null, acct: null, sel: null, idle: null };
+    let alTimer: NodeJS.Timeout | null = null;
+    const armAutoLogout = () => {
+      if (!this.autoLogoutMs) return;
+      if (alTimer) clearTimeout(alTimer);
+      alTimer = setTimeout(() => {
+        this.autoLogouts++;
+        if (!sock.destroyed) {
+          sock.write("* BYE Autologout; idle for too long\r\n");
+          sock.end();
+        }
+      }, this.autoLogoutMs);
+      alTimer.unref?.();
+    };
+    sock.on("close", () => {
+      if (alTimer) clearTimeout(alTimer);
+      if (st.idle) this.endIdle(st.idle.live, "close");
+    });
+    armAutoLogout();
     let buf = Buffer.alloc(0);
     let pending: { parts: Buffer[]; need: number; lineSoFar: string; tag: string } | null = null;
     let authTag: string | null = null;
@@ -236,7 +359,7 @@ export class FakeImapServer {
         }, this.latencyMs);
       return true;
     };
-    write(`* OK [CAPABILITY ${this.caps()}] fake imap ready\r\n`);
+    if (!this.stallGreeting) write(`* OK [CAPABILITY ${this.caps()}] fake imap ready\r\n`);
 
     const pump = () => {
       for (;;) {
@@ -251,6 +374,13 @@ export class FakeImapServer {
         const line = buf.subarray(0, idx).toString("utf8");
         buf = buf.subarray(idx + 2);
 
+        if (st.idle && /^DONE$/i.test(line.trim())) {
+          const { tag, live } = st.idle;
+          st.idle = null;
+          this.endIdle(live, "done");
+          write(`${tag} OK IDLE terminated\r\n`);
+          continue;
+        }
         if (authTag) {
           const tag = authTag;
           authTag = null;
@@ -290,14 +420,38 @@ export class FakeImapServer {
       }
     };
     sock.on("data", (d) => {
+      armAutoLogout();
       buf = Buffer.concat([buf, d]);
       pump();
     });
   }
 
+  private endIdle(live: { sess: IdleSession; timer?: NodeJS.Timeout }, by: IdleSession["endedBy"]) {
+    if (!this.idleLive.has(live as any)) return;
+    this.idleLive.delete(live as any);
+    if (live.timer) clearTimeout(live.timer);
+    live.sess.end = Date.now();
+    live.sess.endedBy ??= by;
+  }
+
   private doLogin(tag: string, u: string, p: string, st: any, write: (s: string | Buffer) => void) {
-    this.commands.push({ user: null, selected: null, line: `${tag} LOGIN-ATTEMPT ${u} ***` });
+    const d = typeof this.loginDelay === "function" ? this.loginDelay() : this.loginDelay;
+    if (d > 0) {
+      setTimeout(() => this.doLoginNow(tag, u, p, st, write), d);
+      return;
+    }
+    this.doLoginNow(tag, u, p, st, write);
+  }
+  private doLoginNow(tag: string, u: string, p: string, st: any, write: (s: string | Buffer) => void) {
+    this.commands.push({ user: null, selected: null, line: `${tag} LOGIN-ATTEMPT ${u} ***`, ts: Date.now() });
     const a = this.accounts.get(u);
+    const rejected = typeof this.rejectLogins === "function" ? this.rejectLogins(u) : this.rejectLogins;
+    if (rejected) {
+      this.loginAttempts.push({ ts: Date.now(), user: u, ok: false });
+      write(`${tag} ${this.loginRejectText}\r\n`);
+      return;
+    }
+    this.loginAttempts.push({ ts: Date.now(), user: u, ok: !!(a && a.pass === p) });
     if (a && a.pass === p) {
       st.user = u;
       st.acct = a;
@@ -316,14 +470,59 @@ export class FakeImapServer {
       void h.released.then(() => this.handleNow(tag, line, literals, st, write, sock));
       return;
     }
-    this.handleNow(tag, line, literals, st, write, sock);
+    this.afterHold(tag, line, literals, st, write, sock);
+  }
+
+  private logOnly(rest: string, st: any) {
+    const logLine = /^(LOGIN|AUTHENTICATE)/i.test(rest) ? rest.split(" ")[0] + " ***" : rest.replace(/\{\d+\+?\}/g, "{literal}");
+    this.commands.push({ user: st.user, selected: st.sel?.name ?? null, line: logLine, ts: Date.now() });
+  }
+
+  private afterHold(tag: string, line: string, literals: Buffer[], st: any, write: (s: string | Buffer) => void, sock: tls.TLSSocket) {
+    const rest = line.slice(tag.length + 1);
+    const f = this.faults.find((x) => x.left > 0 && x.match(rest, st.user, st.sel?.name ?? null));
+    if (!f) return this.handleNow(tag, line, literals, st, write, sock);
+    f.left--;
+    f.hits++;
+    const sp = f.spec;
+    switch (sp.kind) {
+      case "delay":
+        setTimeout(() => !sock.destroyed && this.handleNow(tag, line, literals, st, write, sock), sp.ms);
+        return;
+      case "hang":
+        this.logOnly(rest, st);
+        return;
+      case "drop":
+        this.logOnly(rest, st);
+        sock.destroy();
+        return;
+      case "drop-after-apply":
+        this.handleNow(tag, line, literals, st, () => true, sock);
+        setImmediate(() => sock.destroy());
+        return;
+      case "drop-mid-response": {
+        const chunks: Buffer[] = [];
+        this.handleNow(tag, line, literals, st, (x) => { chunks.push(typeof x === "string" ? Buffer.from(x) : x); return true; }, sock);
+        const all = Buffer.concat(chunks);
+        sock.write(all.subarray(0, sp.bytes), () => setImmediate(() => sock.destroy()));
+        return;
+      }
+      case "malformed":
+        this.logOnly(rest, st);
+        write((sp.raw ?? "* 1 FETCH (UID ((( \u0001\u0002 {zz}\r\n{tag} OK garbage\r\n").replace(/\{tag\}/g, tag));
+        return;
+      case "reply":
+        this.logOnly(rest, st);
+        write(`${tag} ${sp.text}\r\n`);
+        return;
+    }
   }
 
   private handleNow(tag: string, line: string, literals: Buffer[], st: any, write: (s: string | Buffer) => void, sock: tls.TLSSocket) {
     // tokenise (literals get substituted in order)
     const rest = line.slice(tag.length + 1);
     const logLine = /^(LOGIN|AUTHENTICATE)/i.test(rest) ? rest.split(" ")[0] + " ***" : rest.replace(/\{\d+\+?\}/g, "{literal}");
-    this.commands.push({ user: st.user, selected: st.sel?.name ?? null, line: logLine });
+    this.commands.push({ user: st.user, selected: st.sel?.name ?? null, line: logLine, ts: Date.now() });
 
     let toks: Tok[];
     try {
@@ -434,6 +633,26 @@ export class FakeImapServer {
     // ---- commands needing a selected folder
     const sel: FakeFolder | null = st.sel;
     if (!sel) return no("no mailbox selected");
+    if (cmd === "IDLE") {
+      if (!this.idleCap) return write(`${tag} BAD IDLE not supported\r\n`);
+      const sess: IdleSession = { user: st.user, folder: sel.name, start: Date.now() };
+      const live: { sess: IdleSession; sock: import("node:net").Socket; write: (s: string | Buffer) => unknown; timer?: NodeJS.Timeout } = { sess, sock, write };
+      if (this.idleMaxMs > 0) {
+        live.timer = setTimeout(() => {
+          sess.endedBy = "timeout";
+          this.endIdle(live, "timeout");
+          if (!sock.destroyed) {
+            sock.write("* BYE IDLE limit exceeded\r\n");
+            sock.end();
+          }
+        }, this.idleMaxMs);
+        live.timer.unref?.();
+      }
+      this.idleSessions.push(sess);
+      this.idleLive.add(live);
+      st.idle = { tag, live };
+      return write("+ idling\r\n");
+    }
     const isUid = cmd === "UID";
     const sub = isUid ? String(args[0]).toUpperCase() : cmd;
     const a = isUid ? args.slice(1) : args;

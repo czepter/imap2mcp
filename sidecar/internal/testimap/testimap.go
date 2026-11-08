@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -30,6 +31,8 @@ const (
 	User       = "alice@example.test"
 	Pass       = "s3cret-Pa55w0rd!xyz"
 	ServerName = "mail.example.test"
+	// ExemptIP is the source address of the helper clients (Client, SetFlags, Expunge).
+	ExemptIP = "127.0.0.2"
 )
 
 // Server is a running test IMAPS server.
@@ -41,6 +44,9 @@ type Server struct {
 	CAPool *x509.CertPool
 	User   *imapmemserver.User
 	srv    *imapserver.Server
+
+	// fault injection / observation (see faults.go)
+	faults
 }
 
 type lit struct {
@@ -98,21 +104,30 @@ func New(t testing.TB, folders ...string) *Server {
 		user.Create(f, nil)
 	}
 	mem.AddUser(user)
+	s := &Server{}
+	s.faults.init()
 	srv := imapserver.New(&imapserver.Options{
-		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return mem.NewSession(), nil, nil
+		NewSession: func(c *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return &faultSession{SessionIMAP4rev2: mem.NewSession().(imapserver.SessionIMAP4rev2), srv: s, conn: c}, nil, nil
 		},
+		Logger:       log.New(io.Discard, "", 0),
 		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}}},
 		InsecureAuth: true,
 	})
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", srv2cfg(leafDER, leafKey))
+	tl, err := tls.Listen("tcp", "127.0.0.1:0", srv2cfg(leafDER, leafKey))
 	if err != nil {
 		t.Fatal(err)
 	}
+	ln := &faultListener{Listener: tl, f: &s.faults}
 	go srv.Serve(ln)
-	t.Cleanup(func() { _ = srv.Close() })
-	a := ln.Addr().(*net.TCPAddr)
-	return &Server{Addr: a.String(), IP: "127.0.0.1", Port: a.Port, CAFile: caFile, CAPool: pool, User: user, srv: srv}
+	t.Cleanup(func() {
+		s.SetHang(false)
+		s.DropAll()
+		_ = srv.Close()
+	})
+	a := tl.Addr().(*net.TCPAddr)
+	s.Addr, s.IP, s.Port, s.CAFile, s.CAPool, s.User, s.srv = a.String(), "127.0.0.1", a.Port, caFile, pool, user, srv
+	return s
 }
 
 func srv2cfg(der []byte, key *ecdsa.PrivateKey) *tls.Config {
@@ -144,7 +159,12 @@ func (s *Server) Append(folder string, raw []byte, flags ...imap.Flag) imap.UID 
 // Client returns a logged-in test client (for external mutations).
 func (s *Server) Client(t testing.TB) *imapclient.Client {
 	t.Helper()
-	c, err := imapclient.DialTLS(s.Addr, &imapclient.Options{TLSConfig: &tls.Config{RootCAs: s.CAPool, ServerName: ServerName}})
+	// Test clients connect from 127.0.0.2 so that SetBlocked (which simulates
+	// lost connectivity for the system under test) does not lock the test itself out.
+	c, err := imapclient.DialTLS(s.Addr, &imapclient.Options{
+		TLSConfig: &tls.Config{RootCAs: s.CAPool, ServerName: ServerName},
+		Dialer:    &net.Dialer{Timeout: 10 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(ExemptIP)}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

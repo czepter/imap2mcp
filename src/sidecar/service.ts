@@ -1,7 +1,8 @@
 import { getMailboxCredentials } from "../imap/mailboxes.js";
 import { assertHostAllowed } from "../imap/ssrf.js";
 import { Supervisor, type SupervisorOptions } from "./supervisor.js";
-import { RPC_UNKNOWN_MAILBOX, SidecarRpcError } from "./errors.js";
+import { RPC_UNKNOWN_MAILBOX, RPC_UPSTREAM, SidecarRpcError } from "./errors.js";
+import type { SidecarStatus, StatusSource } from "./status.js";
 
 export interface OpenParams {
   mailboxId: string; host: string; ip: string; port: number; servername: string; user: string; pass: string;
@@ -28,10 +29,12 @@ export interface SidecarServiceOptions extends SupervisorOptions {
  * The Node-side facade used by MCP tools: supervised process + authenticated client +
  * lazy `open` of mailboxes (re-`open` after restart or on -32002, retrying the call once).
  */
-export class SidecarService {
+export class SidecarService implements StatusSource {
   readonly supervisor: Supervisor;
   private opened = new Map<string, { gen: number; at: number }>();
   private opening = new Map<string, Promise<void>>();
+  /** Mailboxes whose last `open` was refused for bad credentials: the sidecar has no session for them but reports auth_failed. */
+  private authRejected = new Set<string>();
   private readonly openParams: OpenParamsProvider;
   private readonly readyWaitMs: number;
   private readonly reopenAfterMs: number;
@@ -64,7 +67,13 @@ export class SidecarService {
     if (!p) {
       p = (async () => {
         const params = await this.openParams(mailboxId);
-        await this.supervisor.client.call("open", { ...params });
+        try {
+          await this.supervisor.client.call("open", { ...params });
+        } catch (e) {
+          if (e instanceof SidecarRpcError && e.code === RPC_UPSTREAM && /authentication failed/i.test(e.message)) this.authRejected.add(mailboxId);
+          throw e;
+        }
+        this.authRejected.delete(mailboxId);
         this.opened.set(mailboxId, { gen, at: Date.now() });
       })().finally(() => this.opening.delete(mailboxId));
       this.opening.set(mailboxId, p);
@@ -75,11 +84,17 @@ export class SidecarService {
   /** Mailbox-scoped RPC. Opens lazily; on -32002 re-opens and retries exactly once. */
   async callMailbox<T = unknown>(mailboxId: string, method: string, params: Record<string, unknown> = {}): Promise<T> {
     await this.ready();
+    // The sidecar answered "authentication failed" for this mailbox earlier. The Node layer short-circuits
+    // calls while its own auth_failed latch is set (tools answer AUTH_FAILED without reaching us), so a call
+    // arriving here means the operator pressed Retry or edited the credentials: lift the sidecar's latch and
+    // re-open with the stored credentials. At most one login attempt per such call, never a loop.
+    if (this.authRejected.has(mailboxId)) await this.retryMailbox(mailboxId);
     await this.ensureOpen(mailboxId);
     const run = () => this.supervisor.client.call<T>(method, { ...params, mailboxId });
     try {
       return await run();
     } catch (e) {
+      if (e instanceof SidecarRpcError && e.code === RPC_UPSTREAM && /authentication failed/i.test(e.message)) this.authRejected.add(mailboxId);
       if (e instanceof SidecarRpcError && e.code === RPC_UNKNOWN_MAILBOX) {
         this.opened.delete(mailboxId);
         await this.ensureOpen(mailboxId, true);
@@ -100,9 +115,35 @@ export class SidecarService {
     }
   }
 
+  /** Mailboxes opened in the current sidecar process, plus those whose open was rejected for bad credentials. */
+  trackedMailboxIds(): string[] {
+    const gen = this.supervisor.generation;
+    const ids = new Set<string>(this.authRejected);
+    for (const [id, o] of this.opened) if (o.gen === gen) ids.add(id);
+    return [...ids];
+  }
+
+  /** The sidecar's view of one mailbox's connection (`status` RPC). Does not open the mailbox. */
+  async status(mailboxId: string): Promise<SidecarStatus> {
+    await this.ready();
+    return this.supervisor.client.call<SidecarStatus>("status", { mailboxId }, 5_000);
+  }
+
+  /**
+   * Clear the sidecar's auth-failure latch for a mailbox (after an admin edited the credentials or pressed
+   * "Retry") and make the next call re-`open` it with the current stored credentials. Throws if the sidecar is unreachable.
+   */
+  async retryMailbox(mailboxId: string): Promise<void> {
+    await this.ready();
+    await this.supervisor.client.call("retry", { mailboxId }, 5_000);
+    this.authRejected.delete(mailboxId);
+    this.opened.delete(mailboxId);
+  }
+
   /** Forget a mailbox (deleted / credentials changed). Best effort. */
   async closeMailbox(mailboxId: string): Promise<void> {
     this.opened.delete(mailboxId);
+    this.authRejected.delete(mailboxId);
     try { await this.call("close", { mailboxId }); } catch { /* ignore */ }
   }
 }

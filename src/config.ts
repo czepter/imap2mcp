@@ -1,3 +1,4 @@
+import { readFileSync } from "fs";
 import { join, resolve } from "path";
 import { initCrypto } from "./imap/crypto.js";
 
@@ -37,8 +38,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = parseInt(env.PORT || "3000", 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) problems.push("PORT is invalid");
 
-  const sessionSecret = env.SESSION_SECRET?.trim() || "";
-  if (!sessionSecret) problems.push("SESSION_SECRET is required (no default). Generate: openssl rand -hex 32");
+  let sessionSecret = env.SESSION_SECRET?.trim() || "";
+  const secretFile = env.SESSION_SECRET_FILE?.trim();
+  let secretFileFailed = false;
+  if (!sessionSecret && secretFile) {
+    try { sessionSecret = readFileSync(secretFile, "utf8").trim(); }
+    catch { secretFileFailed = true; problems.push("SESSION_SECRET_FILE could not be read"); }
+  }
+  if (!sessionSecret) { if (!secretFileFailed) problems.push("SESSION_SECRET (or SESSION_SECRET_FILE) is required (no default). Generate: openssl rand -hex 32"); }
   else if (sessionSecret.length < 32) problems.push("SESSION_SECRET must be at least 32 characters");
 
   const mode = (env.REGISTRATION_MODE || "dynamic").trim();

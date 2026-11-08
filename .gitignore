@@ -6,3 +6,4 @@ data/*.db-wal
 data/*.db-shm
 .env
 secrets/
+data/backups/

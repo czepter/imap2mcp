@@ -32,6 +32,15 @@ func envSecs(name string, def time.Duration) time.Duration {
 	return def
 }
 
+func envMillis(name string, def time.Duration) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return def
+}
+
 func main() {
 	socket := flag.String("socket", "", "unix socket path (default $SIDECAR_SOCKET or $DATA_DIR/sidecar.sock)")
 	flag.Parse()
@@ -78,6 +87,12 @@ func main() {
 		AutoSyncEvery:  envSecs("SIDECAR_AUTOSYNC_SECS", 5*time.Second),
 		FolderIdle:     envSecs("SIDECAR_FOLDER_IDLE_SECS", time.Hour),
 		Logf:           logger.Printf,
+		// docs/DESIGN_V2.md: IDLE_RENEW_SECS (default 1500); RECONNECT_* are test knobs.
+		IdleRenew:        envSecs("IDLE_RENEW_SECS", 25*time.Minute),
+		PollEvery:        envSecs("IDLE_POLL_SECS", 60*time.Second),
+		ReconnectInitial: envMillis("RECONNECT_INITIAL_MS", time.Second),
+		ReconnectMax:     envMillis("RECONNECT_MAX_MS", 60*time.Second),
+		HealthyReset:     envMillis("RECONNECT_HEALTHY_MS", 30*time.Second),
 	})
 	srv, err := rpc.New(rpc.Config{Socket: path, Secret: secret, Logf: logger.Printf}, eng)
 	if err != nil {

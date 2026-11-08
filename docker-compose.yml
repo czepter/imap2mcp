@@ -1,10 +1,11 @@
 services:
   imap-bridge:
     build: .
+    image: imap2mcp:local
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"   # bind to loopback; a TLS reverse proxy is the public entry point
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data                       # SQLite DB, backups/, sidecar socket. Must be writable by uid 1000.
     environment:
       BASE_URL: ${BASE_URL:?set BASE_URL}
       PORT: "3000"
@@ -12,9 +13,24 @@ services:
       ENCRYPTION_KEY_FILE: /run/secrets/imap2mcp_key
       REGISTRATION_MODE: ${REGISTRATION_MODE:-dynamic}
       ALLOW_PRIVATE_HOSTS: ${ALLOW_PRIVATE_HOSTS:-}
+      ADMIN_BOOTSTRAP_TOKEN: ${ADMIN_BOOTSTRAP_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      AUDIT_FAIL_MODE: ${AUDIT_FAIL_MODE:-closed}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-90}
     secrets:
       - imap2mcp_key
+    healthcheck:                                # same probe as the image; stated here so it is visible and tunable
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: unless-stopped
+    stop_grace_period: 20s                      # graceful shutdown closes IMAP/sidecar and checkpoints the DB
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 secrets:
   imap2mcp_key:

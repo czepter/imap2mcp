@@ -4,6 +4,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { TokenContext } from "../types.js";
 import { ToolError, errorResult, normalizeError, okResult } from "./errors.js";
+import { withAudit } from "../audit/withAudit.js";
+import { resolveRequestId } from "../security/requestId.js";
 import {
   MAX_BATCH, MAX_PAGE, createDraftTool, listFoldersTool, listMailboxesTool, moveMessageTool,
   readMessageTool, searchMessagesTool, setFlagsTool,
@@ -22,24 +24,28 @@ const email = z.string().min(3).max(320);
  * Build a server whose tool handlers close over the token context of THIS request only.
  * Each handler re-checks policy against live DB grants (inside the tool functions).
  */
-export function createMcpServer(ctx: TokenContext): McpServer {
+export function createMcpServer(ctx: TokenContext, opts: { requestId?: string } = {}): McpServer {
   const server = new McpServer({ name: "imap-bridge", version: "0.1.0" });
 
-  const wrap = <A>(mutating: boolean, fn: (ctx: TokenContext, a: A) => unknown | Promise<unknown>) =>
-    async (a: A) => {
-      try { return okResult(await fn(ctx, a)); }
-      catch (e) { return errorResult(e instanceof ToolError ? e : normalizeError(e, mutating)); }
-    };
+  const requestId = opts.requestId ?? resolveRequestId(undefined);
+
+  // Every tool attempt runs inside withAudit: exactly one audit row is written before the result is returned.
+  const wrap = <A>(tool: string, mutating: boolean, fn: (ctx: TokenContext, a: A) => unknown | Promise<unknown>) =>
+    async (a: A) =>
+      withAudit({ tool, clientId: ctx.clientId, requestId, mutating }, a, async () => {
+        try { return okResult(await fn(ctx, a)); }
+        catch (e) { return errorResult(e instanceof ToolError ? e : normalizeError(e, mutating), requestId); }
+      });
 
   server.registerTool("list_mailboxes", {
     description: "List the mailboxes this client may access (ids, labels, granted capabilities).",
     inputSchema: {},
-  }, wrap(false, (c) => listMailboxesTool(c)));
+  }, wrap("list_mailboxes", false, (c) => listMailboxesTool(c)));
 
   server.registerTool("list_folders", {
     description: "List the folders of a mailbox that you may read (search/read headers/read body allowed).",
     inputSchema: { mailbox: mailboxId },
-  }, wrap(false, listFoldersTool));
+  }, wrap("list_folders", false, listFoldersTool));
 
   server.registerTool("search_messages", {
     description: `Search one folder, or all folders you may search when folder is omitted; returns headers only, newest first, max ${MAX_PAGE} per page. Pass nextCursor as cursor for the next page. Does not change read state.`,
@@ -52,12 +58,12 @@ export function createMcpServer(ctx: TokenContext): McpServer {
       limit: z.number().int().min(1).max(MAX_PAGE).optional(),
       cursor: z.union([z.number().int().positive(), z.string().min(1).max(4096)]).optional(),
     },
-  }, wrap(false, searchMessagesTool));
+  }, wrap("search_messages", false, searchMessagesTool));
 
   server.registerTool("read_message", {
     description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. Does not set \\Seen.",
     inputSchema: { ref, include: z.array(z.enum(["headers", "body"])).min(1).max(2).optional().describe('Default: both') },
-  }, wrap(false, readMessageTool));
+  }, wrap("read_message", false, readMessageTool));
 
   server.registerTool("create_draft", {
     description: "Save a draft into the mailbox's configured Drafts folder via IMAP APPEND. Never sends. May return UNKNOWN_OUTCOME: do not blindly retry.",
@@ -65,12 +71,12 @@ export function createMcpServer(ctx: TokenContext): McpServer {
       mailbox: mailboxId, to: z.array(email).max(50).optional(), cc: z.array(email).max(50).optional(),
       subject: z.string().max(998), body: z.string().max(1_000_000), inReplyTo: z.string().max(998).optional(),
     },
-  }, wrap(true, createDraftTool));
+  }, wrap("create_draft", true, createDraftTool));
 
   server.registerTool("move_message", {
     description: "Move a message to another folder of the same mailbox. Returns identifiers only.",
     inputSchema: { ref, destination: folder },
-  }, wrap(true, moveMessageTool));
+  }, wrap("move_message", true, moveMessageTool));
 
   server.registerTool("set_flags", {
     description: `Add/remove flags on up to ${MAX_BATCH} messages. \\Deleted and \\Recent are rejected. Reports per-message outcomes; not atomic.`,
@@ -79,7 +85,7 @@ export function createMcpServer(ctx: TokenContext): McpServer {
       add: z.array(z.string().max(64)).max(16).optional(),
       remove: z.array(z.string().max(64)).max(16).optional(),
     },
-  }, wrap(true, setFlagsTool));
+  }, wrap("set_flags", true, setFlagsTool));
 
   return server;
 }
@@ -100,7 +106,10 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     });
     return;
   }
-  const server = createMcpServer(ctx);
+  const rid = req.requestId ?? resolveRequestId(req.get("x-request-id"));
+  req.requestId = rid;
+  if (!res.getHeader("X-Request-Id")) res.setHeader("X-Request-Id", rid);
+  const server = createMcpServer(ctx, { requestId: rid });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => { void transport.close(); void server.close(); });
   try {

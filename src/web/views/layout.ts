@@ -45,8 +45,10 @@ td>div+div{margin-top:4px}
 .pill.read{background:var(--bg);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line-strong)}
 .pill.draft,.pill.organize{background:var(--warn-soft);color:var(--warn)}.pill.organize{box-shadow:inset 0 0 0 1px var(--warn)}
 .none{color:var(--muted)}
+.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px;align-items:end}.filters .row{padding-bottom:2px}
+.pager{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--line)}
 label{display:block;font-weight:600;margin:14px 0 5px;font-size:13px}
-input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:8px 12px;min-height:36px;border:1px solid var(--line-strong);border-radius:8px;font:inherit;background:var(--surface);color:var(--ink)}
+input[type=text],input[type=password],input[type=number],input[type=date],select,textarea{width:100%;padding:8px 12px;min-height:36px;border:1px solid var(--line-strong);border-radius:8px;font:inherit;background:var(--surface);color:var(--ink)}
 .hint{color:var(--muted);font-size:13px;margin-top:5px}.grid2{display:grid;grid-template-columns:1fr 140px;gap:14px}
 .alert,.error,.success{padding:10px 14px;border-radius:9px;margin-bottom:18px;display:flex;gap:10px;justify-content:space-between;align-items:center}
 .success{background:var(--ok-soft);color:var(--ok)}.error{background:var(--danger-soft);color:var(--danger)}.alert.warn{background:var(--warn-soft);color:var(--warn)}.alert a{color:inherit;font-weight:600}
@@ -64,12 +66,13 @@ form.inline{display:inline}
 export const logo = (fill = "var(--logo)", stroke = "var(--side)") =>
   `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 3v6c0 5-3.4 9.2-8 11-4.6-1.8-8-6-8-11V5z" fill="${fill}"/><path d="M7.5 10.5l4.5 3 4.5-3M7.5 10.5h9v5h-9z" fill="none" stroke="${stroke}" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
 
-export type NavKey = "overview" | "mailboxes" | "clients" | "tokens";
+export type NavKey = "overview" | "mailboxes" | "clients" | "tokens" | "audit";
 const NAV: Array<[NavKey, string, string]> = [
   ["overview", "Overview", "/dashboard"],
   ["mailboxes", "Mailboxes", "/dashboard#mailboxes"],
   ["clients", "Clients", "/dashboard#clients"],
   ["tokens", "Tokens", "/dashboard#tokens"],
+  ["audit", "Audit log", "/audit"],
 ];
 
 /** A titled card. `title` and `aside` are trusted HTML built by the caller (escape dynamic parts). */

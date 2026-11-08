@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -11,7 +12,7 @@ import (
 // folderCache is the cache for one (mailbox, folder, uidValidity). Identity
 // includes uidValidity: when it changes the whole struct content is dropped.
 type folderCache struct {
-	syncMu sync.Mutex // serialises syncs of this folder
+	syncMu ctxLock // serialises syncs of this folder (context-aware)
 
 	mu            sync.RWMutex
 	synced        bool
@@ -68,3 +69,42 @@ func (f *folderCache) maxUIDLocked() uint32 {
 	}
 	return f.hdrs[len(f.hdrs)-1].UID
 }
+
+// ctxLock is a mutex whose Lock honours a context, so a request that is
+// queued behind a long-running sync still meets its own deadline.
+type ctxLock struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (l *ctxLock) init() { l.once.Do(func() { l.ch = make(chan struct{}, 1) }) }
+
+// Lock acquires the lock or returns ctx.Err().
+func (l *ctxLock) Lock(ctx context.Context) error {
+	l.init()
+	select {
+	case l.ch <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case l.ch <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// TryLock acquires the lock without waiting.
+func (l *ctxLock) TryLock() bool {
+	l.init()
+	select {
+	case l.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// Unlock releases the lock.
+func (l *ctxLock) Unlock() { <-l.ch }

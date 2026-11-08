@@ -2,7 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"errors"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -26,6 +29,19 @@ type Options struct {
 	FolderIdle     time.Duration                       // evict folders unused for this long (default 1 h)
 	Logf           func(format string, args ...any)    // never receives credentials
 	Now            func() time.Time
+
+	// Resilience (docs/DESIGN_V2.md "IDLE", "Backoff").
+	IdleRenew        time.Duration // IDLE_RENEW_SECS, default 25 min
+	PollEvery        time.Duration // polling fallback when the server lacks IDLE, default 60 s
+	ReconnectInitial time.Duration // RECONNECT_INITIAL_MS, default 1 s
+	ReconnectMax     time.Duration // RECONNECT_MAX_MS, default 60 s
+	HealthyReset     time.Duration // a connection healthy this long resets the backoff, default 30 s
+	OpTimeout        time.Duration // bound for each watcher protocol operation, default 30 s
+	BackgroundCap    time.Duration // cap for one background sync job, default 300 s
+	WatchScan        time.Duration // how often warm folders are (re)evaluated for watching, default 1 s
+	MaxWatched       int           // watched folders per mailbox (INBOX + warm folders), default 4
+	Rand             func() float64
+	DisableWatch     bool // tests only: no IDLE watchers / reconnect loop
 }
 
 func (o *Options) defaults() {
@@ -44,6 +60,39 @@ func (o *Options) defaults() {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.IdleRenew <= 0 {
+		o.IdleRenew = 25 * time.Minute
+	}
+	if o.PollEvery <= 0 {
+		o.PollEvery = 60 * time.Second
+	}
+	if o.ReconnectInitial <= 0 {
+		o.ReconnectInitial = time.Second
+	}
+	if o.ReconnectMax <= 0 {
+		o.ReconnectMax = 60 * time.Second
+	}
+	if o.ReconnectMax < o.ReconnectInitial {
+		o.ReconnectMax = o.ReconnectInitial
+	}
+	if o.HealthyReset <= 0 {
+		o.HealthyReset = 30 * time.Second
+	}
+	if o.OpTimeout <= 0 {
+		o.OpTimeout = 30 * time.Second
+	}
+	if o.BackgroundCap <= 0 {
+		o.BackgroundCap = 300 * time.Second
+	}
+	if o.WatchScan <= 0 {
+		o.WatchScan = time.Second
+	}
+	if o.MaxWatched <= 0 {
+		o.MaxWatched = 4
+	}
+	if o.Rand == nil {
+		o.Rand = rand.Float64
+	}
 }
 
 // Engine owns all mailboxes.
@@ -52,6 +101,26 @@ type Engine struct {
 
 	mu        sync.RWMutex
 	mailboxes map[string]*mailbox
+	// failedOpen remembers credentials the server rejected at open time, so
+	// that repeated opens with the same credentials do not hit the server.
+	failedOpen map[string]failedOpen
+}
+
+type failedOpen struct {
+	fp    [sha256.Size]byte
+	since time.Time
+}
+
+func fingerprint(cr imapx.Creds) [sha256.Size]byte {
+	h := sha256.New()
+	for _, p := range []string{cr.Host, cr.IP, cr.ServerName, cr.User, cr.Pass} {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte{byte(cr.Port >> 8), byte(cr.Port)})
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 type mailbox struct {
@@ -61,12 +130,13 @@ type mailbox struct {
 	acct    *imapx.Account
 	creds   imapx.Creds
 	folders map[string]*folderCache
+	sup     *supervisor
 }
 
 // New creates an engine.
 func New(opts Options) *Engine {
 	opts.defaults()
-	return &Engine{opts: opts, mailboxes: map[string]*mailbox{}}
+	return &Engine{opts: opts, mailboxes: map[string]*mailbox{}, failedOpen: map[string]failedOpen{}}
 }
 
 func (e *Engine) mailbox(id string) (*mailbox, error) {
@@ -102,34 +172,95 @@ func (mb *mailbox) folder(name string, create bool) *folderCache {
 }
 
 // Open registers (or replaces the credentials of) a mailbox and verifies that
-// it can log in. Credentials are kept in memory only.
+// it can log in. Credentials are kept in memory only. Opening with credentials
+// the server already rejected does not contact the server again; it fails
+// until Retry or an Open with different credentials.
 func (e *Engine) Open(ctx context.Context, id string, cr imapx.Creds) error {
 	if id == "" || cr.Host == "" || cr.IP == "" || cr.User == "" {
 		return errf(CodeInvalidParams, "mailboxId, host, ip and user are required")
 	}
+	fp := fingerprint(cr)
+	e.mu.RLock()
+	fo, rejected := e.failedOpen[id]
+	mb := e.mailboxes[id]
+	e.mu.RUnlock()
+	if rejected && fo.fp == fp {
+		return errAuthFailed()
+	}
+	if mb != nil {
+		mb.mu.RLock()
+		same, acct := mb.acct != nil && mb.creds == cr, mb.acct
+		mb.mu.RUnlock()
+		if same {
+			// Idempotent re-open: keep the account, watchers and cache.
+			if acct.AuthFailed() {
+				return errAuthFailed()
+			}
+			if err := acct.Verify(ctx); err != nil {
+				return upstream(cr, err)
+			}
+			return nil
+		}
+	}
 	acct := imapx.NewAccount(cr, e.opts.TLS)
 	if err := acct.Verify(ctx); err != nil {
 		acct.Close()
+		if errors.Is(err, imapx.ErrAuth) {
+			e.mu.Lock()
+			e.failedOpen[id] = failedOpen{fp: fp, since: e.opts.Now()}
+			e.mu.Unlock()
+		}
 		return upstream(cr, err)
 	}
 	e.mu.Lock()
-	mb := e.mailboxes[id]
+	delete(e.failedOpen, id)
+	mb = e.mailboxes[id]
 	if mb == nil {
 		mb = &mailbox{id: id, folders: map[string]*folderCache{}}
 		e.mailboxes[id] = mb
 	}
 	e.mu.Unlock()
 	mb.mu.Lock()
-	old := mb.acct
+	old, oldSup := mb.acct, mb.sup
 	if old != nil && !old.Creds().SameEndpoint(cr) {
 		mb.folders = map[string]*folderCache{} // different account: nothing is reusable
 	}
 	mb.acct, mb.creds = acct, cr
+	mb.sup = e.newSupervisor(mb, acct)
+	sup := mb.sup
 	mb.mu.Unlock()
+	if oldSup != nil {
+		oldSup.stop()
+	}
 	if old != nil {
 		old.Close()
 	}
+	if sup != nil {
+		sup.start()
+	}
 	return nil
+}
+
+// Retry clears the auth-failure latch of a mailbox (after an admin edited the
+// credentials or pressed "Retry") and wakes its reconnect loop. Unknown
+// mailboxes are fine: there is nothing latched.
+func (e *Engine) Retry(id string) {
+	e.mu.Lock()
+	delete(e.failedOpen, id)
+	mb := e.mailboxes[id]
+	e.mu.Unlock()
+	if mb == nil {
+		return
+	}
+	mb.mu.RLock()
+	acct, sup := mb.acct, mb.sup
+	mb.mu.RUnlock()
+	if acct != nil {
+		acct.ClearAuthFailure()
+	}
+	if sup != nil {
+		sup.retry()
+	}
 }
 
 // Close forgets a mailbox, its credentials and its cache.
@@ -137,13 +268,17 @@ func (e *Engine) Close(id string) {
 	e.mu.Lock()
 	mb := e.mailboxes[id]
 	delete(e.mailboxes, id)
+	delete(e.failedOpen, id)
 	e.mu.Unlock()
 	if mb != nil {
 		mb.mu.Lock()
-		acct := mb.acct
+		acct, sup := mb.acct, mb.sup
 		mb.folders = map[string]*folderCache{}
-		mb.acct, mb.creds = nil, imapx.Creds{}
+		mb.acct, mb.creds, mb.sup = nil, imapx.Creds{}, nil
 		mb.mu.Unlock()
+		if sup != nil {
+			sup.stop()
+		}
 		if acct != nil {
 			acct.Close()
 		}
@@ -201,7 +336,9 @@ func (e *Engine) Sync(ctx context.Context, id, folder, mode string) (SyncResult,
 		return SyncResult{}, err
 	}
 	f := mb.folder(folder, true)
-	f.syncMu.Lock()
+	if err := f.syncMu.Lock(ctx); err != nil {
+		return SyncResult{}, upstream(imapx.Creds{}, err)
+	}
 	defer f.syncMu.Unlock()
 	return e.syncLocked(ctx, mb, f, folder, mode == "full")
 }
@@ -222,7 +359,9 @@ func (e *Engine) ensureFresh(ctx context.Context, mb *mailbox, folder string) (*
 		f.mu.Unlock()
 		return f, nil
 	}
-	f.syncMu.Lock()
+	if err := f.syncMu.Lock(ctx); err != nil {
+		return nil, upstream(imapx.Creds{}, err)
+	}
 	defer f.syncMu.Unlock()
 	if fresh() {
 		return f, nil
@@ -588,7 +727,7 @@ func (e *Engine) reconcileDue(ctx context.Context) {
 				return // a foreground sync is running
 			}
 			defer j.f.syncMu.Unlock()
-			rctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			rctx, cancel := context.WithTimeout(ctx, e.opts.BackgroundCap)
 			defer cancel()
 			if _, err := e.syncLocked(rctx, j.mb, j.f, j.name, true); err != nil {
 				// retry after the next interval rather than hammering the server

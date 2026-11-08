@@ -3,14 +3,18 @@ import type { ImapFlow } from "imapflow";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { getDb } from "../db/database.js";
 import { getMailboxCredentials } from "../imap/mailboxes.js";
-import { withImap } from "../imap/client.js";
+import { ImapAuthError, ImapConnectError, ImapTimeoutError, OPERATION_TIMEOUT_MS, withImap } from "../imap/client.js";
+import { remainingMs, withBudget } from "../imap/budget.js";
+import { auditNote } from "../audit/context.js";
+import { log } from "../log.js";
 import {
   allowedMailboxes, anyAllowedMailboxes, assertOp, filterAllowedFolders, isOpAllowed, mailboxHasAllow, type Operation,
 } from "../policy/policy.js";
 import { getSidecar, sidecarEnabled } from "../sidecar/index.js";
 import { PolicyError, type TokenContext } from "../types.js";
 import { getBackend, type BodyResult, type Criteria, type FolderInfo, type Header, type ReadBackend } from "./backend.js";
-import { ToolError, normalizeError } from "./errors.js";
+import { ToolError, isDefiniteRejection, normalizeError } from "./errors.js";
+import { assertMailboxUsable } from "./reliability.js";
 
 export const MAX_PAGE = 50;
 export const MAX_BATCH = 25;
@@ -40,6 +44,74 @@ function checkFresh(c: ImapFlow, ref: MessageRef): void {
   }
 }
 
+/** Time kept back from a write attempt so a reconcile read still fits in the 30 s tool budget. */
+const RECONCILE_RESERVE_MS = 8_000;
+
+function writeTimeoutMs(): number {
+  const rem = remainingMs();
+  if (rem === undefined) return OPERATION_TIMEOUT_MS;
+  return Math.max(1_000, Math.min(OPERATION_TIMEOUT_MS, rem - RECONCILE_RESERVE_MS));
+}
+
+/**
+ * Could the server have applied the write although we got an error? Only failures that happened before the command
+ * was issued (policy, connect, auth) or explicit server rejections (NO/BAD, specific response codes) are certain.
+ */
+export function isAmbiguousWriteFailure(e: unknown): boolean {
+  if (e instanceof ToolError || e instanceof PolicyError) return false;
+  if (e instanceof ImapAuthError || e instanceof ImapConnectError) return false;
+  if (e instanceof ImapTimeoutError) return true;
+  return !isDefiniteRejection(e);
+}
+
+
+/**
+ * imapflow's messageMove/messageCopy/messageFlags(Add|Remove)/messageDelete swallow command errors (including lost
+ * connections) and return false. Run one and make the failure explicit:
+ *  - server answered NO/BAD (tagged response arrived): definite refusal, never applied -> ToolError;
+ *  - connection lost / no tagged response: ambiguous -> the underlying error is rethrown so callers reconcile.
+ * Writes are never replayed.
+ */
+async function strictWrite<T>(c: ImapFlow, what: string, fn: () => Promise<T | false | undefined>): Promise<T> {
+  const lg = (c as unknown as { log?: { warn?: (...a: unknown[]) => unknown } }).log;
+  let captured: unknown;
+  const orig = lg?.warn;
+  if (lg) lg.warn = (...a: unknown[]) => { const o = a[0] as { err?: unknown } | undefined; if (o && typeof o === "object" && o.err) captured = o.err; return orig?.apply(lg, a); };
+  let r: T | false | undefined;
+  try { r = await fn(); } finally { if (lg) lg.warn = orig; }
+  if (r !== false && r !== undefined) return r;
+  const sock = (c as unknown as { socket?: { destroyed?: boolean } }).socket;
+  const lost = !c.usable || !sock || sock.destroyed === true;
+  const x = captured as { responseStatus?: string } | undefined;
+  const refused = !lost && (x ? (x.responseStatus === "NO" || x.responseStatus === "BAD" || isDefiniteRejection(x)) : false);
+  if (refused) {
+    const te = normalizeError(captured, true);
+    // An unclassified NO/BAD is a plain refusal, not an unclear state.
+    throw te.code === "UNKNOWN_OUTCOME" ? new ToolError("UPSTREAM_ERROR", `Server refused the ${what}`, undefined, { retryable: false }) : te;
+  }
+  if (captured && !lost && !x?.responseStatus) throw captured;
+  const e = (captured as Error | undefined) ?? Object.assign(new Error("Connection lost"), { code: "NoConnection" });
+  throw e;
+}
+
+/** Writes are never marked retryable. */
+function writeError(e: unknown): ToolError {
+  const te = normalizeError(e, true);
+  te.retryable = false;
+  return te;
+}
+
+/** Find the UIDs of a message by Message-ID in a folder (read-only). Caller must have re-checked policy. */
+async function findByMessageId(
+  mailbox: string, folder: string, messageId: string, recheck?: () => void,
+): Promise<{ uidValidity: number; uids: number[] }> {
+  return withImap(mailbox, (c) => withFolder(c, folder, true, async () => {
+    recheck?.(); // policy re-checked after the (possibly slow) verification connection is open, immediately before SEARCH
+    const found = (await c.search({ header: { "message-id": messageId } }, { uid: true })) || [];
+    return { uidValidity: uidValidityOf(c), uids: [...found].sort((a, b) => a - b) };
+  }));
+}
+
 /**
  * Read-path gate for an explicit folder. No read-type access to the mailbox at all => FORBIDDEN (same as an unknown mailbox).
  * Otherwise a folder where any required op is denied answers EXACTLY like a nonexistent folder (existence oracle),
@@ -47,7 +119,10 @@ function checkFresh(c: ImapFlow, ref: MessageRef): void {
  */
 function assertFolderReadable(ctx: TokenContext, mailbox: string, folder: string, ops: Operation[]): void {
   if (!mailboxHasAllow(ctx, mailbox, ops)) throw new PolicyError();
-  if (!ops.every((o) => isOpAllowed(ctx, mailbox, folder, o))) throw new ToolError("NOT_FOUND", "Folder not found");
+  if (!ops.every((o) => isOpAllowed(ctx, mailbox, folder, o))) {
+    auditNote({ denied: true }); // policy-masked NOT_FOUND: the audit log records the truth
+    throw new ToolError("NOT_FOUND", "Folder not found");
+  }
 }
 
 // ---------- list_mailboxes ----------
@@ -77,9 +152,10 @@ function selectable(f: FolderInfo): boolean {
   return !f.flags.some((x) => NOT_SELECTABLE.has(x.toLowerCase()));
 }
 
-export async function listFoldersTool(ctx: TokenContext, a: { mailbox: string }) {
+async function listFoldersImpl(ctx: TokenContext, a: { mailbox: string }) {
   // Mailbox-level gate before touching the sidecar: no rule reaching a scope => same answer as an unknown mailbox.
   if (!mailboxHasAllow(ctx, a.mailbox, READ_OPS)) throw new PolicyError();
+  auditNote({ mailboxId: a.mailbox });
   const all = (await getBackend().listFolders(a.mailbox)).filter(selectable);
   const allowed = new Set(filterAllowedFolders(ctx, a.mailbox, READ_OPS, all.map((f) => f.path)));
   const visible = all.filter((f) => allowed.has(f.path));
@@ -184,7 +260,7 @@ async function mapLimit<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): 
   return out;
 }
 
-export async function searchMessagesTool(ctx: TokenContext, a: SearchArgs) {
+async function searchMessagesImpl(ctx: TokenContext, a: SearchArgs) {
   const limit = Math.min(Math.max(a.limit ?? 20, 1), MAX_PAGE);
   const criteria: Criteria = {};
   if (a.from) criteria.from = a.from;
@@ -216,6 +292,7 @@ export async function searchMessagesTool(ctx: TokenContext, a: SearchArgs) {
     const items = r.items.slice(0, limit);
     const total = await countMatches(b, a.mailbox, a.folder, criteria, a.text);
     assertFolderReadable(ctx, a.mailbox, a.folder, ["search", "read_headers"]);
+    auditNote({ mailboxId: a.mailbox, folder: a.folder, uidValidity: r.uidValidity, uids: items.map((h) => h.uid) });
     return {
       limit,
       total,
@@ -269,6 +346,14 @@ export async function searchMessagesTool(ctx: TokenContext, a: SearchArgs) {
     if (n > 0) state[f] = p.items[n - 1].uid;
     else if (cursor[f] !== undefined) state[f] = cursor[f];
   }
+  // multi-folder: the folder differs per hit, so record the per-folder breakdown
+  const byFolder = new Map<string, { folder: string; uidValidity: number; uids: number[] }>();
+  for (const x of out) {
+    const e = byFolder.get(x.folder) ?? { folder: x.folder, uidValidity: x.h.uidValidity, uids: [] };
+    e.uids.push(x.h.uid);
+    byFolder.set(x.folder, e);
+  }
+  auditNote({ mailboxId: a.mailbox, refs: [...byFolder.values()] });
   return {
     limit,
     total,
@@ -281,11 +366,13 @@ export async function searchMessagesTool(ctx: TokenContext, a: SearchArgs) {
 /** Denied read of a ref: no read access to the mailbox => FORBIDDEN, else the same answer as a nonexistent folder. */
 function deniedRead(ctx: TokenContext, ref: MessageRef): never {
   if (!mailboxHasAllow(ctx, ref.mailbox, ["read_headers", "read_body"])) throw new PolicyError();
+  auditNote({ denied: true });
   throw new ToolError("NOT_FOUND", "Folder not found");
 }
 
-export async function readMessageTool(ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) {
+async function readMessageImpl(ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) {
   const { ref } = a;
+  auditNote({ mailboxId: ref.mailbox, folder: ref.folder, uidValidity: ref.uidValidity, uids: [ref.uid] });
   const want = new Set(a.include && a.include.length ? a.include : ["headers", "body"]);
   const headers = want.has("headers") && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers");
   const body = want.has("body") && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_body");
@@ -340,12 +427,14 @@ function build(opts: ConstructorParameters<typeof MailComposer>[0]): Promise<Buf
     new MailComposer(opts).compile().build((err, buf) => (err ? reject(err) : resolve(buf))));
 }
 
-export async function createDraftTool(ctx: TokenContext, a: DraftArgs) {
+async function createDraftImpl(ctx: TokenContext, a: DraftArgs) {
   const row = getDb().prepare("SELECT drafts_folder FROM mailboxes WHERE id = ?").get(a.mailbox) as { drafts_folder: string | null } | undefined;
   const folder = row?.drafts_folder;
   // `draft` is evaluated against the mailbox's configured Drafts folder; an unconfigured/unknown mailbox is just denied.
   if (!folder) { if (!mailboxHasAllow(ctx, a.mailbox, ["draft"])) throw new PolicyError(); throw new ToolError("INVALID_INPUT", "No Drafts folder is configured for this mailbox"); }
   assertOp(ctx, a.mailbox, folder, "draft");
+  assertMailboxUsable(a.mailbox); // latched mailbox: answer AUTH_FAILED without contacting the server
+  auditNote({ mailboxId: a.mailbox, folder });
 
   const creds = getMailboxCredentials(a.mailbox);
   const messageId = `<${randomUUID()}@imap2mcp.invalid>`;
@@ -355,34 +444,64 @@ export async function createDraftTool(ctx: TokenContext, a: DraftArgs) {
     inReplyTo: a.inReplyTo, references: a.inReplyTo,
   });
 
-  // From here on the outcome may be ambiguous: never retry automatically.
+  const done = (uidValidity: number, uid: number, dest: string, reconciled: boolean) => {
+    auditNote({ uidValidity, uids: [uid], ...(reconciled ? { reconciled: true } : {}) });
+    return { ref: { mailbox: a.mailbox, folder: dest, uidValidity, uid }, messageId, ...(reconciled ? { reconciled: true } : {}) };
+  };
+  const unknown = (why: string) => new ToolError("UNKNOWN_OUTCOME",
+    `${why} The draft may or may not exist in the Drafts folder; it will not be re-created automatically. Check the Drafts folder (Message-ID is in the response) before retrying.`,
+    { messageId }, { retryable: false });
+  /** Verify by Message-ID after an ambiguous failure. Policy is re-checked first: a revoked client must not read. */
+  const reconcile = async () => {
+    try {
+      assertOp(ctx, a.mailbox, folder, "draft");
+      const f = await findByMessageId(a.mailbox, folder, messageId, () => assertOp(ctx, a.mailbox, folder, "draft"));
+      if (f.uids.length && f.uidValidity) return done(f.uidValidity, f.uids[f.uids.length - 1], folder, true);
+    } catch (e) {
+      log.warn("draft reconcile could not verify", { mailboxId: a.mailbox, errorCode: normalizeError(e, true).code });
+    }
+    return null;
+  };
+
+  // From here on the outcome may be ambiguous: the APPEND is never replayed.
   let res: Awaited<ReturnType<ImapFlow["append"]>>;
   try {
     res = await withImap(a.mailbox, (c) => {
       assertOp(ctx, a.mailbox, folder, "draft"); // recheck immediately before the write executes
       return c.append(folder, raw, ["\\Draft"]);
-    });
+    }, { timeoutMs: writeTimeoutMs() });
   } catch (e) {
-    const err = normalizeError(e, true);
-    if (err.code === "UNKNOWN_OUTCOME") err.extra = { messageId };
-    throw err;
-  } finally {
-    await invalidateAfterWrite(a.mailbox, [folder]);
+    try {
+      if (!isAmbiguousWriteFailure(e)) {
+        const err = writeError(e);
+        if (err.code === "UNKNOWN_OUTCOME") err.extra = { messageId };
+        throw err;
+      }
+      const r = await reconcile();
+      if (r) return r;
+      throw unknown("The connection failed or timed out after the append was sent and the result could not be verified.");
+    } finally {
+      await invalidateAfterWrite(a.mailbox, [folder]);
+    }
   }
-  if (res && res.uid && res.uidValidity) {
-    return { ref: { mailbox: a.mailbox, folder: res.destination || folder, uidValidity: Number(res.uidValidity), uid: Number(res.uid) }, messageId };
-  }
-  throw new ToolError("UNKNOWN_OUTCOME",
-    "Draft append was not confirmed with a stable reference; it may exist in the Drafts folder. Do not retry blindly.", { messageId });
+  await invalidateAfterWrite(a.mailbox, [folder]);
+  if (res && res.uid && res.uidValidity) return done(Number(res.uidValidity), Number(res.uid), res.destination || folder, false);
+  // Server accepted but gave no stable reference (no UIDPLUS): resolve it by Message-ID.
+  const r = await reconcile();
+  if (r) return r;
+  throw unknown("Draft append was not confirmed with a stable reference.");
 }
 
 // ---------- move_message ----------
-export async function moveMessageTool(ctx: TokenContext, a: { ref: MessageRef; destination: string }) {
+async function moveMessageImpl(ctx: TokenContext, a: { ref: MessageRef; destination: string }) {
   const { ref, destination } = a;
   assertOp(ctx, ref.mailbox, ref.folder, "move"); // source AND destination folder, same mailbox
   assertOp(ctx, ref.mailbox, destination, "move");
   if (destination === ref.folder) throw new ToolError("INVALID_INPUT", "Destination equals source folder");
+  assertMailboxUsable(ref.mailbox);
+  auditNote({ mailboxId: ref.mailbox, folder: ref.folder, uidValidity: ref.uidValidity, uids: [ref.uid] });
   let sent = false;
+  let messageId: string | undefined;
   try {
     return await withImap(ref.mailbox, async (c) => {
       const folders = await c.list();
@@ -395,19 +514,22 @@ export async function moveMessageTool(ctx: TokenContext, a: { ref: MessageRef; d
         if (!exists) throw new ToolError("NOT_FOUND", "Message not found");
         assertOp(ctx, ref.mailbox, ref.folder, "move"); // recheck right before the write
         assertOp(ctx, ref.mailbox, destination, "move");
+        // Message-ID is only needed to verify the outcome if the connection fails mid-move (best effort).
+        try { messageId = (await c.fetchOne(String(ref.uid), { envelope: true }, { uid: true }) || undefined)?.envelope?.messageId || undefined; } catch { /* reconcile will be inconclusive */ }
         const opts = { uid: true } as const;
         let map: { destination?: string; uidValidity?: bigint; uidMap?: Map<number, number> } | false;
         sent = true;
         if (c.capabilities.has("MOVE")) {
-          map = await c.messageMove(String(ref.uid), destination, opts);
-          if (!map) throw new ToolError("UPSTREAM_ERROR", "Server refused the move");
+          map = await strictWrite(c, "move", () => c.messageMove(String(ref.uid), destination, opts));
         } else if (c.capabilities.has("UIDPLUS")) {
           // COPY, then flag only this UID and UID EXPUNGE it (imapflow uses UID EXPUNGE when UIDPLUS is present).
-          map = await c.messageCopy(String(ref.uid), destination, opts);
-          if (!map) throw new ToolError("UPSTREAM_ERROR", "Server refused the copy");
-          const flagged = await c.messageFlagsAdd(String(ref.uid), ["\\Deleted"], opts);
-          const ok = flagged && (await c.messageDelete(String(ref.uid), opts));
-          if (!ok) throw new ToolError("UNKNOWN_OUTCOME", "Message was copied but the original could not be removed", {});
+          map = await strictWrite(c, "copy", () => c.messageCopy(String(ref.uid), destination, opts));
+          try {
+            await strictWrite(c, "flag", () => c.messageFlagsAdd(String(ref.uid), ["\\Deleted"], opts));
+            await strictWrite(c, "delete", () => c.messageDelete(String(ref.uid), opts));
+          } catch {
+            throw new ToolError("UNKNOWN_OUTCOME", "Message was copied but the original could not be removed", {});
+          }
         } else {
           sent = false;
           throw new ToolError("UNSUPPORTED", "Server supports neither MOVE nor UIDPLUS; a safe move is not possible");
@@ -421,12 +543,55 @@ export async function moveMessageTool(ctx: TokenContext, a: { ref: MessageRef; d
             : null,
         };
       });
-    });
+    }, { timeoutMs: writeTimeoutMs() });
   } catch (e) {
-    throw normalizeError(e, sent);
+    if (!sent || !isAmbiguousWriteFailure(e)) throw writeError(e);
+    return await reconcileMove(ctx, ref, destination, messageId);
   } finally {
     if (sent) await invalidateAfterWrite(ref.mailbox, [ref.folder, destination]);
   }
+}
+
+/**
+ * Ambiguous MOVE (connection dropped/timed out after the command was sent): verify, never replay.
+ * destination has the Message-ID and the source UID is gone => success (reconciled);
+ * source still present and destination lacks it => UNKNOWN_OUTCOME with likelyNotApplied; anything else => UNKNOWN_OUTCOME.
+ */
+async function reconcileMove(ctx: TokenContext, ref: MessageRef, destination: string, messageId: string | undefined) {
+  const unknown = (likelyNotApplied: boolean) => new ToolError("UNKNOWN_OUTCOME",
+    likelyNotApplied
+      ? "The move was probably not applied (the message is still in the source folder), but this could not be fully confirmed. It was not retried automatically."
+      : "The move may or may not have been applied and could not be verified. It was not retried automatically; search both folders before retrying.",
+    likelyNotApplied ? { likelyNotApplied: true } : undefined, { retryable: false });
+  try {
+    // Policy is re-checked before EVERY reconcile read: a revocation mid-failure must not read.
+    assertOp(ctx, ref.mailbox, ref.folder, "move");
+    assertOp(ctx, ref.mailbox, destination, "move");
+    const srcState = await withImap(ref.mailbox, (c) => withFolder(c, ref.folder, true, async () => {
+      assertOp(ctx, ref.mailbox, ref.folder, "move");
+      assertOp(ctx, ref.mailbox, destination, "move");
+      if (uidValidityOf(c) !== ref.uidValidity) return "unknown" as const;
+      const m = await c.fetchOne(String(ref.uid), { uid: true }, { uid: true });
+      return m ? ("present" as const) : ("gone" as const);
+    }));
+    if (!messageId) throw unknown(false);
+    assertOp(ctx, ref.mailbox, ref.folder, "move");
+    assertOp(ctx, ref.mailbox, destination, "move");
+    const dest = await findByMessageId(ref.mailbox, destination, messageId, () => {
+      assertOp(ctx, ref.mailbox, ref.folder, "move");
+      assertOp(ctx, ref.mailbox, destination, "move");
+    });
+    if (dest.uids.length && srcState === "gone") {
+      const uid = dest.uids[dest.uids.length - 1];
+      auditNote({ reconciled: true });
+      return { moved: true, from: ref, newRef: { mailbox: ref.mailbox, folder: destination, uidValidity: dest.uidValidity, uid }, reconciled: true };
+    }
+    if (!dest.uids.length && srcState === "present") throw unknown(true);
+  } catch (e) {
+    if (e instanceof ToolError) throw e;
+    log.warn("move reconcile could not verify", { mailboxId: ref.mailbox, errorCode: normalizeError(e, true).code });
+  }
+  throw unknown(false);
 }
 
 // ---------- set_flags ----------
@@ -449,9 +614,11 @@ export function validateFlags(flags: string[] | undefined): string[] {
   return out;
 }
 
-type Outcome = { ref: MessageRef; status: "ok" | "error"; code?: string; message?: string };
+type Outcome = { ref: MessageRef; status: "ok" | "error"; code?: string; message?: string; reconciled?: boolean };
 
-export async function setFlagsTool(ctx: TokenContext, a: { refs: MessageRef[]; add?: string[]; remove?: string[] }) {
+const sameFlag = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+async function setFlagsImpl(ctx: TokenContext, a: { refs: MessageRef[]; add?: string[]; remove?: string[] }) {
   const add = validateFlags(a.add);
   const remove = validateFlags(a.remove);
   if (add.length + remove.length === 0) throw new ToolError("INVALID_INPUT", "Provide at least one flag to add or remove");
@@ -464,6 +631,7 @@ export async function setFlagsTool(ctx: TokenContext, a: { refs: MessageRef[]; a
     const [m, f] = JSON.parse(k) as [string, string];
     assertOp(ctx, m, f, "flag");
   }
+  for (const m of new Set(a.refs.map((r) => r.mailbox))) assertMailboxUsable(m);
 
   const groups = new Map<string, MessageRef[]>();
   for (const r of a.refs) {
@@ -472,13 +640,44 @@ export async function setFlagsTool(ctx: TokenContext, a: { refs: MessageRef[]; a
   }
   const outcomes: Outcome[] = [];
   const fail = (r: MessageRef, e: unknown) => {
-    const te = normalizeError(e, true);
+    const te = writeError(e);
     outcomes.push({ ref: r, status: "error", code: te.code, message: te.message });
+  };
+  const unknownFor = (r: MessageRef, why: string) =>
+    outcomes.push({ ref: r, status: "error", code: "UNKNOWN_OUTCOME", message: why });
+
+  /** Ambiguous STORE failure: re-FETCH flags and compare with the desired state. Policy re-checked before the read. */
+  const reconcileGroup = async (refs: MessageRef[]) => {
+    const { mailbox, folder } = refs[0];
+    const pending = () => { const d = new Set(outcomes.map((o) => o.ref)); return refs.filter((r) => !d.has(r)); };
+    const why = "The connection failed or timed out while the flags were being changed and the result could not be verified; they may or may not have been applied. Not retried automatically.";
+    try {
+      assertOp(ctx, mailbox, folder, "flag");
+      const uids = [...new Set(pending().map((r) => r.uid))];
+      const state = await withImap(mailbox, (c) => withFolder(c, folder, true, async () => {
+        if (uidValidityOf(c) !== refs[0].uidValidity) return null;
+        const m = new Map<number, Set<string>>();
+        for await (const msg of c.fetch(uids.join(","), { uid: true, flags: true }, { uid: true })) m.set(msg.uid, new Set([...(msg.flags ?? [])]));
+        return m;
+      }));
+      for (const r of pending()) {
+        const fl = state?.get(r.uid);
+        if (!fl) { unknownFor(r, why); continue; }
+        const have = [...fl];
+        const matches = add.every((f) => have.some((h) => sameFlag(h, f))) && remove.every((f) => !have.some((h) => sameFlag(h, f)));
+        if (matches) { outcomes.push({ ref: r, status: "ok", reconciled: true }); auditNote({ reconciled: true }); }
+        else unknownFor(r, why);
+      }
+    } catch (e) {
+      log.warn("flag reconcile could not verify", { mailboxId: mailbox, errorCode: normalizeError(e, true).code });
+      for (const r of pending()) unknownFor(r, why);
+    }
   };
 
   for (const refs of groups.values()) {
     const { mailbox, folder } = refs[0];
     let attempted = false;
+    let storeStarted = false;
     try {
       assertOp(ctx, mailbox, folder, "flag"); // recheck immediately before execution
       attempted = true;
@@ -492,20 +691,41 @@ export async function setFlagsTool(ctx: TokenContext, a: { refs: MessageRef[]; a
         if (live.length === 0) return;
         assertOp(ctx, mailbox, folder, "flag"); // final recheck right before STORE
         const range = live.join(",");
-        if (add.length) await c.messageFlagsAdd(range, add, { uid: true });
-        if (remove.length) await c.messageFlagsRemove(range, remove, { uid: true });
+        storeStarted = true;
+        if (add.length) await strictWrite(c, "flag change", () => c.messageFlagsAdd(range, add, { uid: true }));
+        if (remove.length) await strictWrite(c, "flag change", () => c.messageFlagsRemove(range, remove, { uid: true }));
         for (const r of refs) if (present.has(r.uid)) outcomes.push({ ref: r, status: "ok" });
-      }));
+      }), { timeoutMs: writeTimeoutMs() });
     } catch (e) {
-      const done = new Set(outcomes.map((o) => o.ref));
-      refs.filter((r) => !done.has(r)).forEach((r) => fail(r, e));
+      if (storeStarted && isAmbiguousWriteFailure(e)) await reconcileGroup(refs);
+      else {
+        const done = new Set(outcomes.map((o) => o.ref));
+        refs.filter((r) => !done.has(r)).forEach((r) => fail(r, e));
+      }
     } finally {
       if (attempted) await invalidateAfterWrite(mailbox, [folder]);
     }
   }
+  const affected = outcomes.filter((o) => o.status === "ok").map((o) => o.ref);
+  const gk = new Set(a.refs.map((r) => JSON.stringify([r.mailbox, r.folder, r.uidValidity])));
+  const first = a.refs[0];
+  auditNote({
+    mailboxId: first.mailbox,
+    ...(gk.size === 1 ? { folder: first.folder, uidValidity: first.uidValidity } : {}),
+    uids: affected.map((r) => r.uid),
+  });
   return {
     results: a.refs.map((r) => outcomes.find((o) => o.ref === r)!),
     succeeded: outcomes.filter((o) => o.status === "ok").length,
     failed: outcomes.filter((o) => o.status === "error").length,
   };
 }
+
+// ---------- budgeted entry points ----------
+// Every upstream tool operation (including retries and reconciliation) must finish within 30 s in total.
+export const listFoldersTool = (ctx: TokenContext, a: { mailbox: string }) => withBudget(() => listFoldersImpl(ctx, a));
+export const searchMessagesTool = (ctx: TokenContext, a: SearchArgs) => withBudget(() => searchMessagesImpl(ctx, a));
+export const readMessageTool = (ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) => withBudget(() => readMessageImpl(ctx, a));
+export const createDraftTool = (ctx: TokenContext, a: DraftArgs) => withBudget(() => createDraftImpl(ctx, a));
+export const moveMessageTool = (ctx: TokenContext, a: { ref: MessageRef; destination: string }) => withBudget(() => moveMessageImpl(ctx, a));
+export const setFlagsTool = (ctx: TokenContext, a: { refs: MessageRef[]; add?: string[]; remove?: string[] }) => withBudget(() => setFlagsImpl(ctx, a));

@@ -112,9 +112,13 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
 
   it("a ciphertext moved to another row does not decrypt (AAD binds row and column)", async () => {
     const other = await addMailboxRaw(s, { label: "Twin", host: "localhost", port: s.fake.port, user: ALICE, pass: "irrelevant-pw" });
+    await s.srv.stop(); // edit the file only while no server holds it open: a live WAL is not reliably visible to a second connection
     const db = s.srv.db();
     const real = (db.prepare("SELECT imap_password_enc e FROM mailboxes WHERE id = ?").get(s.mailbox[ALICE]) as any).e;
-    db.prepare("UPDATE mailboxes SET imap_password_enc = ? WHERE id = ?").run(real, other);
+    expect(db.prepare("UPDATE mailboxes SET imap_password_enc = ? WHERE id = ?").run(real, other).changes).toBe(1);
+    db.close();
+    await s.restart();
+    await adminLogin(s.admin, s.adminPassword);
     const logins = () => s.fake.commands.filter((c) => c.line.includes("LOGIN-ATTEMPT")).length;
     const n = logins();
     const html = await (await s.admin.postWithCsrf(`/mailboxes/${other}`, `/mailboxes/${other}/test`, {})).text();

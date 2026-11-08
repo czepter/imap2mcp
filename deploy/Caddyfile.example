@@ -1,0 +1,20 @@
+# Caddy 2. Obtains and renews the TLS certificate automatically (ports 80 and 443 must reach this host).
+# Replace mcp.example.com with the host part of BASE_URL.
+mcp.example.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:3000 {
+		# Streamable HTTP (MCP) can answer with text/event-stream: never buffer, flush immediately.
+		flush_interval -1
+
+		# The app trusts exactly ONE proxy hop (express "trust proxy" = 1) when BASE_URL is https.
+		# Caddy sets X-Forwarded-For / -Proto / -Host itself and overwrites client-supplied values
+		# (no trusted_proxies configured), which is what the app needs.
+		transport http {
+			read_timeout 1h
+			dial_timeout 5s
+		}
+	}
+
+	# HSTS is also sent by the app when BASE_URL is https; nothing to add here.
+}

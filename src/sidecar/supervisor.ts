@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { SidecarClient } from "./client.js";
 import { SidecarUnavailableError } from "./errors.js";
+import { log } from "../log.js";
+const sidecarLog = log.child({ component: "sidecar" });
 
 export interface SupervisorOptions {
   bin: string;
@@ -56,7 +58,7 @@ export class Supervisor extends EventEmitter {
     this.client = new SidecarClient({ socketPath: opts.socketPath, secret: "unset" });
   }
 
-  private log(m: string): void { (this.o.log ?? ((s) => console.log(`[sidecar] ${s}`)))(m); }
+  private log(m: string): void { (this.o.log ?? ((s) => sidecarLog.info(s)))(m); }
 
   /** Start supervising. Resolves after the first successful ready, rejects if the first start fails (supervision then continues). */
   async start(): Promise<void> {

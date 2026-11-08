@@ -4,7 +4,7 @@
 
 A single-owner bridge that lets AI agents use your IMAP mailboxes through the [Model Context Protocol](https://modelcontextprotocol.io/) (Streamable HTTP), with OAuth 2.1 authorization, encrypted mailbox credentials, and permissions you edit per client and per mailbox.
 
-**Status: Version 1 ("Precision and performance").** v0 gave coarse mailbox-level grants; v1 adds folder x operation rules with explicit deny, and serves reads from a small Go sidecar that keeps a header cache so mailboxes with 10,000 messages stay responsive. See `docs/VERSION_PLAN.md` for what each version promises, `docs/PRD.md` for the requirements, `docs/DESIGN_V0.md` and `docs/DESIGN_V1.md` for the binding design contracts, and `docs/BENCHMARKS.md` for measured numbers (including any gate that failed).
+**Status: Version 2 ("Reliable and observable").** v0 gave coarse mailbox-level grants; v1 added folder x operation rules with explicit deny and a Go sidecar with a header cache; v2 makes it something you can run unattended: every tool call is audited, failures are structured and diagnosable, provider outages and bad passwords are handled without retry storms, and a write whose outcome is unclear is verified against the server instead of being replayed. See `docs/VERSION_PLAN.md` for what each version promises, `docs/PRD.md` for the requirements, `docs/DESIGN_V0.md`, `docs/DESIGN_V1.md` and `docs/DESIGN_V2.md` for the binding design contracts, and `docs/BENCHMARKS.md` for measured numbers.
 
 ## What it does
 
@@ -20,13 +20,17 @@ A single-owner bridge that lets AI agents use your IMAP mailboxes through the [M
 
   A folder selector is an exact IMAP path, `*` (everything) or `prefix/*` (the prefix and its sub-folders); case-sensitive, nothing else is a wildcard. **Any matching deny wins; otherwise any matching allow; otherwise deny.** The token's scopes stay a ceiling. Rules are read on every call, so removing a rule or revoking a client applies to the next call (existing tokens included), and writes are re-checked right before they are sent. Search never touches, counts or reveals folders where `search` is denied, and error messages do not reveal whether a denied folder exists. The v0 "presets" (read / draft / organize per mailbox) remain as shortcuts that expand to rules; upgrading from v0 migrates grants without widening anyone's access.
 - **Go sidecar for reads** (v1). LIST/STATUS/FETCH/SEARCH run in `sidecar/` (Go, go-imap v2), reached over a private Unix socket (`DATA_DIR/sidecar.sock`, mode 0600) with a per-process secret passed on the child's stdin. Node stays the policy authority and authorizes before and filters after every sidecar call. The sidecar caches UIDs, flags and envelopes in memory (never bodies), keyed by mailbox, folder, UIDVALIDITY and UID; UIDNEXT drives fetching new mail, and a periodic UID/flag reconciliation (`SYNC_RECONCILE_SECS`, default 30) catches expunges and flag changes made by other clients. Writes (APPEND, MOVE, STORE) stay in Node. If the sidecar is down, tools return `UPSTREAM_ERROR` while Node restarts it; the cache is rebuilt from IMAP.
+- **Audit log** (v2). Every tool attempt (allowed, denied, failed, unknown outcome) writes one row with client, mailbox, folder, UIDVALIDITY, UIDs, tool, outcome, error code and request id, never message content or credentials. Browse and export it (JSONL/CSV) under **Audit** in the admin UI or with `npm run audit:export`; retention defaults to 90 days. By default it fails closed: if the audit row cannot be written, the tool does not run (`AUDIT_FAIL_MODE=open` to accept unaudited access).
+- **Structured errors and request ids** (v2). Every error is `{code, message, requestId, retryable, operatorAction?}`; the same `requestId` is in the `X-Request-Id` header, the log and the audit row. Reads are retried at most twice inside a 30 s budget; writes are never replayed. After a lost connection `create_draft`, `move_message` and `set_flags` are reconciled from server state or answered `UNKNOWN_OUTCOME`. See `docs/ERRORS.md`.
+- **Authentication-failure latch** (v2). When a mailbox's credentials are rejected the bridge stops trying (no lockout-causing retry loops) and tools answer `AUTH_FAILED` with an operator action. Edit the password or press **Retry** in the admin UI to clear it; other mailboxes are unaffected.
+- **Health endpoints** (v2). Unauthenticated `GET /healthz` (liveness) and `GET /readyz` (database, key, sidecar, migrations), used by the Docker `HEALTHCHECK`; per-mailbox state is shown in the admin UI.
 - **Mailbox secrets encrypted at rest** (AES-256-GCM, per-record IV, ciphertext bound to its table/row/column). The master key lives in a file outside the database. A missing or malformed key stops the server from starting; a wrong key makes every mailbox operation fail.
 - **Safe IMAP behavior**: TLS only with certificate validation, no plaintext fallback; reads use `BODY.PEEK` so unread state is not changed; moves use `UID MOVE` or `UID COPY` plus flag and `UID EXPUNGE` of that UID only (never a plain `EXPUNGE`); `\Deleted` cannot be set through the tools.
 - **SSRF policy**: a mailbox host must resolve to public addresses unless it is listed in `ALLOW_PRIVATE_HOSTS`.
 
 ## What it does not do
 
-No sending (no SMTP at all), no permanent deletion, no persistent audit log (v2), no multi-user tenancy (v3), no key rotation tooling yet. Not in v1 either: IMAP XOAUTH2 and CONDSTORE/QRESYNC (see `docs/BACKLOG.md`). Mail content is untrusted input: anything a client with `read` can read is exposed to that client and its model. See `docs/THREAT_MODEL.md`.
+No sending (no SMTP at all), no permanent deletion, no tamper-evident or off-host audit trail, no high availability, no multi-user tenancy (v3), no key rotation tooling yet. Not in v1 either: IMAP XOAUTH2 and CONDSTORE/QRESYNC (see `docs/BACKLOG.md`). Mail content is untrusted input: anything a client with `read` can read is exposed to that client and its model. See `docs/THREAT_MODEL.md`.
 
 ## Quick start (Docker Compose)
 
@@ -81,7 +85,9 @@ Node 22 or newer. `ENCRYPTION_KEY` (64 hex characters) is accepted as an alterna
 |---|---|---|
 | `BASE_URL` | yes for production | Public URL. MCP resource/audience is `${BASE_URL}/mcp`. `https` turns on `Secure` cookies and HSTS. |
 | `ENCRYPTION_KEY_FILE` or `ENCRYPTION_KEY` | yes | 32-byte master key (hex or base64 in the file; 64 hex characters in the variable). No default. |
-| `SESSION_SECRET` | yes | At least 32 characters. No default. |
+| `SESSION_SECRET` or `SESSION_SECRET_FILE` | yes | At least 32 characters. No default. The `_FILE` variant reads (and trims) the secret from a file, e.g. a Docker secret. |
+| `AUDIT_FAIL_MODE` | no | `closed` (default) or `open`. See Audit log. |
+| `AUDIT_RETENTION_DAYS` | no | Audit retention, default 90; 0 keeps forever. |
 | `DATA_DIR` | no | Directory of `bridge.db` (SQLite, WAL). Default `./data`. |
 | `PORT` | no | Default 3000. |
 | `REGISTRATION_MODE` | no | `dynamic` (default, RFC 7591; registration grants nothing) or `admin` (clients are created in the UI only). |
@@ -100,6 +106,7 @@ npm test                  # everything
 npm run test:unit
 npm run test:integration  # spawns the real server against an in-process IMAP-over-TLS fixture
 npm run test:v1           # only the v1 end-to-end suites (policy matrix, sidecar boundary, sync correctness)
+npm run smoke             # build the Docker image and run a deployment smoke test (`npm run smoke:reuse` reuses imap2mcp:smoke)
 npm run bench             # v1 performance gate: 10,000 messages, 20 ms RTT, sidecar in Docker --cpus=2 --memory=2g
 ```
 
@@ -109,10 +116,16 @@ The integration suite needs `openssl` (to create a self-signed certificate for t
 
 - `docs/DESIGN_V0.md`: binding v0 design contract
 - `docs/DESIGN_V1.md`: binding v1 design contract (policy rules, sidecar RPC, performance gate)
+- `docs/DESIGN_V2.md`: binding v2 design contract (audit, failure handling, mutation safety, recovery)
+- `docs/INSTALL.md`: installation walkthrough
+- `docs/UPGRADING.md`: upgrading between versions, pre-migration backups
+- `docs/TROUBLESHOOTING.md`: symptoms, causes and fixes
+- `docs/RECOVERY.md`: restoring from backup, lost key, wrong key, corrupted database
+- `docs/ERRORS.md`: error codes, retryability and what to do
 - `docs/BENCHMARKS.md`: v1 gate results with machine info; failed gates are reported as failed
 - `docs/BACKLOG.md`: deferred work (XOAUTH2, CONDSTORE/QRESYNC) and why
 - `docs/THREAT_MODEL.md`: what is protected, from whom, and what is not
-- `docs/OPERATIONS.md`: deployment, keys, backup and restore, revocation, troubleshooting
+- `docs/OPERATIONS.md`: deployment, environment reference, health endpoints, keys, backup and restore, revocation
 - `docs/CLIENTS.md`: which clients are tested, registration modes, token lifetimes
 - `docs/PRD.md`, `docs/VERSION_PLAN.md`: requirements and release plan
 
