@@ -158,7 +158,7 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
     }
     await s.restart(); // right key again: everything works
     const mcp = await new Mcp(s.base, tokens.access_token).connect();
-    expect((await mcp.call("search_messages", { mailbox: id, folder: "INBOX" })).isError).toBe(false);
+    { const rr = await mcp.call("search_messages", { mailbox: id, folder: "INBOX" }); expect(rr.isError, rr.text).toBe(false); }
     await mcp.close();
   });
 
