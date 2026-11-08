@@ -7,7 +7,7 @@ upstream mkrasselt1/imap-mcp-server; much of it is replaced. **Single owner, SQL
 | # | Decision |
 |---|---|
 | Store | SQLite via better-sqlite3, WAL. DB path `DATA_DIR/bridge.db` (default `./data`). |
-| License | MIT (`LICENSE`), upstream notice retained. |
+| License | MIT (`LICENSE`), upstream notice retained. Owner decision 2026-11-08: license stays MIT. |
 | Encryption | AES-256-GCM, per-record random 12-byte IV, AAD = `"<table>:<row id>:<column>"`. Stored format `v1:<keyId>:<b64 iv>:<b64 ct>:<b64 tag>` in ONE column (no separate iv column). Master key is 32 bytes from `ENCRYPTION_KEY_FILE` (path, preferred; file content hex or base64) or `ENCRYPTION_KEY` (hex, 64 chars). No default key, ever: missing/malformed/wrong key => process refuses to start / decrypt throws (fail closed). `keyId` = first 8 hex of sha256(key), stored for rotation later. DB-column encryption (not whole-DB). Threat model: protects copied DB/WAL only, not a compromised running host. |
 | Tokens | Opaque, 32 random bytes base64url. Only `sha256` hex stored (`token_hash`). Refresh tokens also hashed (rotation on use). Access TTL 1h, refresh 30d. |
 | Audience | Resource = `${BASE_URL}/mcp` (RFC 8707 `resource` param; default to it if absent, reject if different). Stored on code+token; MCP middleware rejects mismatch. |

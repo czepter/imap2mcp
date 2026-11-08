@@ -118,4 +118,4 @@ The integration suite needs `openssl` (to create a self-signed certificate for t
 
 ## Credits and license
 
-MIT, see `LICENSE`. The v0 baseline was imported from [mkrasselt1/imap-mcp-server](https://github.com/mkrasselt1/imap-mcp-server) (MIT, as declared in its README); large parts have since been replaced (storage, authorization model, encryption, tools). Thanks to its author for the starting point.
+MIT, see `LICENSE`. The v0 baseline was imported from [mkrasselt1/imap-mcp-server](https://github.com/mkrasselt1/imap-mcp-server) (MIT); large parts have since been replaced (storage, authorization model, encryption, tools). Thanks to its author for the starting point.
