@@ -44,19 +44,15 @@ jobs:
           retention-days: 3
 
   node:
-    name: node ${{ matrix.node }} (typecheck + vitest)
+    name: node 26 (typecheck + vitest)
     needs: go
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: "26" # LTS; same major as the Dockerfile runtime image
           cache: npm
       - uses: actions/download-artifact@v4
         with:

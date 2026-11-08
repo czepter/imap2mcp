@@ -1,7 +1,7 @@
 # v0 Design Contract ("grob gehalten")
 
 Binding for all v0 work. Source: `docs/PRD.md`, `docs/VERSION_PLAN.md`. Baseline code is derived from
-upstream mkrasselt1/imap-mcp-server; much of it is replaced. **Single owner, SQLite (better-sqlite3), TypeScript ESM, Node 22+ (dev box runs 26; better-sqlite3 ≥13).**
+upstream mkrasselt1/imap-mcp-server; much of it is replaced. **Single owner, SQLite (better-sqlite3), TypeScript ESM, Node 26 LTS (better-sqlite3 ≥13).**
 
 ## Decisions (resolves PRD §13 blockers)
 | # | Decision |
