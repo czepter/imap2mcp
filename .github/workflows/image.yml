@@ -61,7 +61,7 @@ jobs:
       - name: build and push by digest
         id: build
         if: steps.mode.outputs.push == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -71,7 +71,7 @@ jobs:
           cache-to: type=gha,scope=${{ steps.slug.outputs.pair }},mode=max
       - name: build (push=false, not published)
         if: steps.mode.outputs.push != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
