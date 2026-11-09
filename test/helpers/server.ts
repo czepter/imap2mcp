@@ -82,12 +82,15 @@ export async function startServer(o: StartOpts): Promise<RunningServer> {
     cwd: REPO,
     env: env as NodeJS.ProcessEnv,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true, // own process group: tsx spawns the real server as a child, so stop() must signal the whole group
   });
+  const killGroup = (sig: NodeJS.Signals) => { try { process.kill(-proc.pid!, sig); } catch { /* already gone */ } };
   let out = "";
   proc.stdout!.on("data", (d) => (out += d));
   proc.stderr!.on("data", (d) => (out += d));
   const exited = new Promise<number | null>((r) => proc.once("exit", (c) => r(c)));
 
+  const handles: Database.Database[] = [];
   const srv: RunningServer = {
     baseUrl,
     port,
@@ -95,15 +98,20 @@ export async function startServer(o: StartOpts): Promise<RunningServer> {
     output: () => out,
     exited: () => exited,
     async stop() {
+      for (const h of handles.splice(0)) { try { h.close(); } catch { /* already closed */ } }
       if (proc.exitCode === null && proc.signalCode === null) {
-        proc.kill("SIGTERM");
-        const t = setTimeout(() => proc.kill("SIGKILL"), 5000);
+        killGroup("SIGTERM");
+        const t = setTimeout(() => killGroup("SIGKILL"), 10_000);
         await exited;
         clearTimeout(t);
       }
+      killGroup("SIGKILL"); // no orphaned server child may keep the database open after stop() returns
     },
     db() {
-      return new Database(join(o.work.dataDir, "bridge.db"), { readonly: false });
+      // Tracked and closed on stop(): handles left to the GC close at arbitrary moments, racing with server restarts on the same file.
+      const h = new Database(join(o.work.dataDir, "bridge.db"), { readonly: false });
+      handles.push(h);
+      return h;
     },
   };
   if (o.expectExit) return srv;

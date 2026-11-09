@@ -76,6 +76,8 @@ async function run(name: string, o: RunOpts): Promise<Ctr> {
     ...o.env,
   };
   const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:3000`, "--add-host", `${HOST}:host-gateway`,
+    // Run as the host uid so bind-mounted files (db, backups) are mutually readable on any runner (CI uid is not 1000).
+    "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
     "-v", `${o.dataDir}:/app/data`, "-v", `${o.caFile}:/certs/ca.pem:ro`];
   if (o.keyFile) args.push("-v", `${o.keyFile}:/run/secrets/imap2mcp_key:ro`);
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
@@ -190,7 +192,9 @@ describe.skipIf(!!skipReason)("container smoke", () => {
   it("starts non-root; /healthz and /readyz are public, no-store and leak nothing", async () => {
     c = await run("i2m-smoke-main", { dataDir, keyFile, caFile });
     await waitHealthz(c);
-    expect(docker(["exec", c.name, "id", "-u"]).out.trim()).toBe("1000");
+    // The container is started with --user <host uid> for bind-mount access; the image's own default must be non-root.
+    expect(docker(["image", "inspect", "--format", "{{.Config.User}}", IMAGE]).out.trim()).toBe("node");
+    expect(docker(["exec", c.name, "id", "-u"]).out.trim()).not.toBe("0");
 
     const h = await fetch(`${c.base}/healthz`);
     expect(h.status).toBe(200);

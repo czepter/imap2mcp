@@ -1,0 +1,74 @@
+# Tests only. Image building / publishing lives in image.yml and is deliberately independent of this file.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: sidecar (go)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sidecar/go.mod
+          cache-dependency-path: sidecar/go.sum
+      - name: vet
+        working-directory: sidecar
+        run: go vet ./...
+        env: { CGO_ENABLED: "0", GOFLAGS: "-mod=mod" }
+      - name: test
+        working-directory: sidecar
+        run: go test ./...
+        env: { CGO_ENABLED: "0", GOFLAGS: "-mod=mod" }
+      - name: build binary
+        working-directory: sidecar
+        run: go build -trimpath -ldflags="-s -w" -o bin/sidecar ./cmd/sidecar
+        env: { CGO_ENABLED: "0", GOFLAGS: "-mod=mod" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-linux-amd64
+          path: sidecar/bin/sidecar
+          if-no-files-found: error
+          retention-days: 3
+
+  node:
+    name: node 26 (typecheck + vitest)
+    needs: go
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26" # LTS; same major as the Dockerfile runtime image
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidecar-linux-amd64
+          path: sidecar/bin
+      - run: chmod +x sidecar/bin/sidecar
+      - run: npm ci
+      - run: npm run build
+      - name: migrations are in sync with the schema
+        run: |
+          npx drizzle-kit generate --name ci_drift_check >/dev/null 2>&1 || true
+          git status --porcelain drizzle
+          test -z "$(git status --porcelain drizzle)" || { echo "::error::schema.ts differs from committed migrations; run npm run db:generate"; exit 1; }
+      # The v1 sidecar tests skip (not fail) when the binary is missing, so assert it is present.
+      - name: sidecar binary present
+        run: test -x sidecar/bin/sidecar
+      - run: npm test
+        env:
+          SIDECAR_BIN: ${{ github.workspace }}/sidecar/bin/sidecar

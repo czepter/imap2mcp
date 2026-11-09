@@ -77,7 +77,7 @@ export BASE_URL=http://localhost:3000 SESSION_SECRET=$(openssl rand -hex 32) \
 npm start
 ```
 
-Node 22 or newer. `ENCRYPTION_KEY` (64 hex characters) is accepted as an alternative to `ENCRYPTION_KEY_FILE`; the file is preferred because environment variables leak into process listings and crash dumps.
+Node 26 (LTS) or newer. `ENCRYPTION_KEY` (64 hex characters) is accepted as an alternative to `ENCRYPTION_KEY_FILE`; the file is preferred because environment variables leak into process listings and crash dumps.
 
 ## Configuration
 

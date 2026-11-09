@@ -22,6 +22,11 @@ describe("error taxonomy (docs/ERRORS.md)", () => {
     }
   });
 
+  it("a local SQLite failure is UNAVAILABLE, never a mail-server PROTOCOL_ERROR (even if the text says 'malformed')", () => {
+    const e = Object.assign(new Error("database disk image is malformed"), { name: "SqliteError", code: "SQLITE_CORRUPT" });
+    for (const mutating of [false, true]) expect(normalizeError(e, mutating).code).toBe("UNAVAILABLE");
+  });
+
   it("auth failures => AUTH_FAILED with operatorAction, not retryable", () => {
     for (const e of [
       new ImapAuthError(), new ImapAuthError("x", true),

@@ -7,9 +7,9 @@ COPY sidecar/cmd/ ./cmd/
 COPY sidecar/internal/ ./internal/
 RUN go build -trimpath -ldflags="-s -w" -o /out/sidecar ./cmd/sidecar
 
-FROM node:22-slim AS build
+FROM node:26-slim AS build
 WORKDIR /app
-# better-sqlite3 has no prebuilt binary for every Node 22 patch release; fall back to compiling it here.
+# better-sqlite3 has no prebuilt binary for every Node patch release; fall back to compiling it here.
 # The toolchain stays in this stage only.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
@@ -20,7 +20,7 @@ COPY drizzle.config.ts ./
 COPY drizzle/ ./drizzle/
 RUN npm run build && npm prune --omit=dev && npm cache clean --force
 
-FROM node:22-slim
+FROM node:26-slim
 WORKDIR /app
 ENV NODE_ENV=production DATA_DIR=/app/data
 RUN apt-get update && apt-get install -y --no-install-recommends dumb-init && rm -rf /var/lib/apt/lists/*
