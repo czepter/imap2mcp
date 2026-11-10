@@ -11,7 +11,7 @@ on:
         type: boolean
         default: true
       tag:
-        description: "Extra image tag, e.g. 1.2.3 (optional; edge and sha tags are always set)"
+        description: "Extra image tag, e.g. 1.2.3 (optional; edge, latest and sha tags are always set on main)"
         type: string
         required: false
 
@@ -47,13 +47,13 @@ jobs:
         run: echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
         env: { PLATFORM: "${{ matrix.platform }}" }
       - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: steps.mode.outputs.push == 'true'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       # Deployment smoke test against the image just built, natively on each architecture.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.mode.outputs.push != 'true'
         with: { node-version: "26", cache: npm }
       - name: smoke test (${{ matrix.platform }})
@@ -117,17 +117,18 @@ jobs:
           pattern: digests-*
           merge-multiple: true
       - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.IMAGE }}
           tags: |
             type=edge,branch=main
+            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=sha,format=short
       - name: create manifest list
