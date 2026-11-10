@@ -158,6 +158,19 @@ function normalizeInner(e: unknown, mutating: boolean): ToolError {
     : new ToolError("UPSTREAM_ERROR", "Mailbox operation failed");
 }
 
+/**
+ * Operator-only description of the raw failure behind a normalized ToolError, for the log (never for the client:
+ * responses stay generic, see docs/THREAT_MODEL.md). Sidecar messages are already stripped of credentials and the
+ * logger redacts secrets centrally. Bounded and single-line.
+ */
+export function describeCause(e: unknown): string | undefined {
+  if (e instanceof ToolError) return undefined;
+  const x = (e ?? {}) as { name?: string; message?: string; code?: unknown; responseText?: string };
+  const rpc = e instanceof SidecarRpcError ? ` rpc=${e.code}` : typeof x.code === "string" ? ` code=${x.code}` : "";
+  const msg = String(x.responseText || x.message || e).replace(/\s+/g, " ").slice(0, 300);
+  return `${x.name ?? "Error"}${rpc}: ${msg}`;
+}
+
 export interface ErrorPayload {
   code: ToolErrorCode; message: string; requestId?: string; retryable: boolean; operatorAction?: string;
   [k: string]: unknown;

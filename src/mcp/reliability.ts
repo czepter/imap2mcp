@@ -1,9 +1,9 @@
 import { ImapAuthError, isMailboxAuthFailed, markMailboxAuthFailed } from "../imap/client.js";
 import { remainingMs } from "../imap/budget.js";
-import { auditNote } from "../audit/context.js";
+import { auditNote, currentRequestId } from "../audit/context.js";
 import { log } from "../log.js";
 import type { ReadBackend } from "./backend.js";
-import { ToolError, normalizeError } from "./errors.js";
+import { ToolError, describeCause, normalizeError } from "./errors.js";
 
 /** Read retries: at most 2 (3 attempts), jittered, and only while the 30 s tool budget allows (docs/DESIGN_V2.md "Retries"). */
 export const MAX_READ_RETRIES = 2;
@@ -43,6 +43,7 @@ export async function readOp<T>(mailbox: string, fn: () => Promise<T>, rand: () 
       return await raceBudget(fn);
     } catch (e) {
       const te = normalizeError(e, false);
+      log.warn("read failed", { requestId: currentRequestId(), mailboxId: mailbox, attempt: attempt + 1, errorCode: te.code, cause: describeCause(e) });
       if (te.code === "AUTH_FAILED") markMailboxAuthFailed(mailbox);
       const delay = retryDelayMs(attempt, rand);
       const rem = remainingMs();
