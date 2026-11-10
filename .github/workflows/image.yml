@@ -40,7 +40,7 @@ jobs:
     outputs:
       push: ${{ steps.mode.outputs.push }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: mode
         run: echo "push=${{ inputs.push }}" >> "$GITHUB_OUTPUT"
       - id: slug
