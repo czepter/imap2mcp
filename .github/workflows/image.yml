@@ -11,7 +11,7 @@ on:
         type: boolean
         default: true
       tag:
-        description: "Extra image tag, e.g. 1.2.3 (optional; edge and sha tags are always set)"
+        description: "Extra image tag, e.g. 1.2.3 (optional; edge, latest and sha tags are always set on main)"
         type: string
         required: false
 
@@ -128,6 +128,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=edge,branch=main
+            type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=sha,format=short
       - name: create manifest list
