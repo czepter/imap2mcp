@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ImapAuthError, ImapConnectError, ImapTimeoutError } from "../../src/imap/client.js";
-import { ToolError, errorPayload, errorResult, normalizeError } from "../../src/mcp/errors.js";
+import { ToolError, describeCause, errorPayload, errorResult, normalizeError } from "../../src/mcp/errors.js";
 import { runWithAudit } from "../../src/audit/context.js";
 import { CredentialDecryptError } from "../../src/imap/credentialError.js";
 import { PolicyError } from "../../src/types.js";
@@ -83,6 +83,15 @@ describe("error taxonomy (docs/ERRORS.md)", () => {
     expect(u.retryable).toBe(true);
     expect(normalizeError(new ImapConnectError("x"), true).retryable).toBe(false);
     expect(normalizeError(new Error("???")).code).toBe("UPSTREAM_ERROR");
+  });
+
+  it("describeCause gives the operator the raw reason for the log, bounded and single-line; the client message stays generic", () => {
+    const e = new SidecarRpcError(RPC_UPSTREAM, "upstream error: LIST failed:\n  NO [SERVERBUG] boom");
+    expect(normalizeError(e).message).toBe("Mailbox operation failed");
+    expect(describeCause(e)).toBe("SidecarRpcError rpc=-32020: upstream error: LIST failed: NO [SERVERBUG] boom");
+    expect(describeCause(new TypeError("x is undefined"))).toBe("TypeError: x is undefined");
+    expect(describeCause(new Error("a".repeat(1000)))!.length).toBeLessThan(330);
+    expect(describeCause(new ToolError("UPSTREAM_ERROR", "x"))).toBeUndefined();
   });
 
   it("existing mappings are unchanged", () => {
