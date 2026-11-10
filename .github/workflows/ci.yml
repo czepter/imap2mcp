@@ -36,7 +36,7 @@ jobs:
         working-directory: sidecar
         run: go build -trimpath -ldflags="-s -w" -o bin/sidecar ./cmd/sidecar
         env: { CGO_ENABLED: "0", GOFLAGS: "-mod=mod" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sidecar-linux-amd64
           path: sidecar/bin/sidecar
