@@ -109,6 +109,7 @@ export const directBackend: ReadBackend = {
       if (!chosen) return { truncated: false };
       // download() uses BODY.PEEK, so \Seen is not set.
       const dl = await c.download(String(uid), chosen.part || "1", { uid: true, maxBytes: maxBytes + 1 });
+      if (!dl.content) return { truncated: false }; // imapflow 2: no content stream for this part (nothing readable)
       const chunks: Buffer[] = [];
       let len = 0;
       for await (const chunk of dl.content) {
