@@ -3,12 +3,12 @@ const route = useRoute();
 const crumbs = useCrumbState();
 const { signOut, signingOut } = useSignOut();
 
-/** Same nav as the old app (section anchors on the overview), plus the audit log. */
+/** One route per section. */
 const items = [
   { label: "Overview", to: "/dashboard", match: (p: string) => p === "/dashboard" || p === "/" },
-  { label: "Mailboxes", to: "/dashboard#mailboxes", match: (p: string) => p.startsWith("/mailboxes") },
-  { label: "Clients", to: "/dashboard#clients", match: (p: string) => p.startsWith("/clients") },
-  { label: "Tokens", to: "/dashboard#tokens", match: () => false },
+  { label: "Mailboxes", to: "/mailboxes", match: (p: string) => p.startsWith("/mailboxes") },
+  { label: "Clients", to: "/clients", match: (p: string) => p.startsWith("/clients") },
+  { label: "Tokens", to: "/tokens", match: (p: string) => p.startsWith("/tokens") },
   { label: "Audit log", to: "/audit", match: (p: string) => p.startsWith("/audit") },
 ];
 </script>

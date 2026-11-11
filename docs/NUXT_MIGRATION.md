@@ -77,7 +77,7 @@ Behaviour for every mutation is exactly what `src/web/routes.ts`, `src/oauth/aut
 
 ## SPA routes
 
-`/setup`, `/login`, `/` (redirects to `/dashboard`), `/dashboard`, `/mailboxes/new`, `/mailboxes/:id`, `/clients/:id`, `/audit`, `/oauth/authorize`. A global route middleware calls `GET /api/session` once and redirects: setup needed to `/setup`, signed out to `/login?returnTo=...`, signed in on `/login` or `/setup` to `/dashboard`. After sign-in go to `returnTo` when it is a same-site path. Confirmations that were separate pages (disable client, revoke token, delete mailbox) become dialogs.
+`/setup`, `/login`, `/` (redirects to `/dashboard`), `/dashboard`, `/mailboxes`, `/mailboxes/new`, `/mailboxes/:id`, `/clients`, `/clients/:id`, `/tokens`, `/audit`, `/oauth/authorize`. A global route middleware calls `GET /api/session` once and redirects: setup needed to `/setup`, signed out to `/login?returnTo=...`, signed in on `/login` or `/setup` to `/dashboard`. After sign-in go to `returnTo` when it is a same-site path. Confirmations that were separate pages (disable client, revoke token, delete mailbox) become dialogs.
 
 ## Security (must hold after the migration)
 
