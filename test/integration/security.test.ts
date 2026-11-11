@@ -2,6 +2,8 @@
  * Version 0 acceptance criteria 2 and 3 plus the admin-surface hardening from DESIGN_V0:
  * mailbox setup/reconnect after restart, TLS validation, SSRF policy, encryption at rest with the key outside
  * the DB, fail-closed key handling, /setup lock-down, CSRF, session cookie flags, rate limiting.
+ * Ported from the server-rendered admin UI to the JSON API (docs/NUXT_MIGRATION.md): the same properties, asserted on
+ * API responses (status codes and DTOs) instead of HTML pages and redirects.
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { createServer as createTcpServer } from "node:net";
@@ -9,10 +11,10 @@ import { readFileSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { makeSelfSignedCert } from "../helpers/certs.js";
-import { Browser } from "../helpers/http.js";
+import { Browser, errorOf, json } from "../helpers/http.js";
 import { bootstrapTokenFrom, makeWorkdir, startServer } from "../helpers/server.js";
 import {
-  addMailboxRaw, adminLogin, createStack, obtainToken, Mcp, rawMcp, msg, sha256hex, sleep, waitFor, registerClient, consent, REDIRECT, type Stack,
+  addMailboxRaw, adminLogin, createStack, obtainToken, Mcp, rawMcp, msg, sha256hex, sleep, waitFor, registerClient, consent, testMailbox, REDIRECT, type Stack,
 } from "../helpers/stack.js";
 
 const cert = makeSelfSignedCert();
@@ -30,20 +32,27 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
   let s: Stack;
   const secrets: Record<string, string> = {};
 
-  it("sets up through the UI, tests the connection, and never displays the saved secret", async () => {
+  it("sets up through the admin API, tests the connection, and never returns the saved secret", async () => {
     s = await createStack({ accounts: [ALICE] });
     const id = s.mailbox[ALICE];
     const pw = s.imapPasswords[ALICE];
     secrets.imapPassword = pw;
-    for (const path of ["/dashboard", `/mailboxes/${id}`, `/mailboxes/${id}/test`]) {
-      const res = path.endsWith("/test") ? await s.admin.postWithCsrf(`/mailboxes/${id}`, path, {}) : await s.admin.get(path);
-      const html = await res.text();
-      expect(html, path).not.toContain(pw);
-      expect(html, path).not.toMatch(/v1:[0-9a-f]{8}:/); // no ciphertext either
+    const responses: Array<[string, Response]> = [
+      ["GET /api/overview", await s.admin.get("/api/overview")],
+      ["GET /api/mailboxes/:id", await s.admin.get(`/api/mailboxes/${id}`)],
+      ["POST /api/mailboxes/:id/test", await s.admin.postWithCsrf(`/api/mailboxes/${id}/test`)],
+      ["PATCH /api/mailboxes/:id (password kept)", await s.admin.patchWithCsrf(`/api/mailboxes/${id}`, { label: "Box alice", host: "localhost", port: s.fake.port, username: ALICE })],
+      ["GET /api/session", await s.admin.get("/api/session")],
+    ];
+    for (const [name, res] of responses) {
+      expect(res.status, name).toBe(200);
+      const text = await res.text();
+      expect(text, name).not.toContain(pw);
+      expect(text, name).not.toMatch(/v1:[0-9a-f]{8}:/); // no ciphertext either
     }
-    const edit = await (await s.admin.get(`/mailboxes/${id}`)).text();
-    expect(edit).toMatch(/type="password"[^>]*>/);
-    expect(edit).not.toMatch(/type="password"[^>]*value="[^"]+"/);
+    // the Mailbox DTO has no password-ish field at all (the old form rendered an empty password input)
+    const mb = (await (await s.admin.get(`/api/mailboxes/${id}`)).json()) as any;
+    expect(Object.keys(mb.mailbox).sort()).toEqual(["createdAt", "draftsFolder", "host", "id", "label", "port", "username"]);
   });
 
   it("stores the IMAP password as AES-256-GCM v1 ciphertext, bound to its row", async () => {
@@ -89,12 +98,13 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
     await s.restart();
     const id = s.mailbox[ALICE];
     const login = await adminLogin(s.admin, s.adminPassword);
-    expect(login.status).toBe(302);
+    expect(login.status).toBe(204);
     const { tokens } = await obtainToken(s, [[id, "read"]]);
     await s.restart();
     // /setup stays closed and no new bootstrap token is printed after a restart
     expect(bootstrapTokenFrom(s.srv.output())).toBeNull();
-    expect((await fetch(`${s.base}/setup`)).status).toBe(404);
+    expect((await s.admin.session()).setupRequired).toBe(false);
+    expect((await s.admin.postWithCsrf("/api/setup", { token: s.bootstrap, password: "Another-Pw-123456", password2: "Another-Pw-123456" })).status).toBe(404);
 
     const before = s.fake.commands.filter((c) => c.line.startsWith("UID SEARCH")).length;
     const mcp = await new Mcp(s.base, tokens.access_token).connect();
@@ -106,8 +116,9 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
 
     // UI path after restart as well
     await adminLogin(s.admin, s.adminPassword);
-    const t = await (await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {})).text();
-    expect(t).toMatch(/Connected\./);
+    const t = await testMailbox(s, id);
+    expect(t.ok, t.message).toBe(true);
+    expect(t.message).toMatch(/Connected\./);
   });
 
   it("a ciphertext moved to another row does not decrypt (AAD binds row and column)", async () => {
@@ -121,8 +132,9 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
     await adminLogin(s.admin, s.adminPassword);
     const logins = () => s.fake.commands.filter((c) => c.line.includes("LOGIN-ATTEMPT")).length;
     const n = logins();
-    const html = await (await s.admin.postWithCsrf(`/mailboxes/${other}`, `/mailboxes/${other}/test`, {})).text();
-    expect(html).not.toMatch(/Connected\./);
+    const t = await testMailbox(s, other);
+    expect(t.ok).toBe(false);
+    expect(t.message).not.toMatch(/Connected\./);
     expect(logins()).toBe(n); // never even tried to log in
   });
 
@@ -147,8 +159,9 @@ describe.skipIf(!haveOpenssl)("encryption at rest, restart, key handling", () =>
         expect(r.text).not.toContain(s.imapPasswords[ALICE]);
         await mcp.close();
         await adminLogin(s.admin, s.adminPassword);
-        const t = await (await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {})).text();
-        expect(t).not.toMatch(/Connected\./);
+        const t = await testMailbox(s, id);
+        expect(t.ok).toBe(false);
+        expect(JSON.stringify(t)).not.toContain(s.imapPasswords[ALICE]);
       }
       expect(logins()).toBe(n);
       expect(s.srv.output()).not.toContain(s.imapPasswords[ALICE]);
@@ -213,9 +226,10 @@ describe.skipIf(!haveOpenssl)("TLS validation and SSRF policy on mailbox connect
     const s = await createStack({ accounts: [ALICE], skipMailboxes: true, noCa: true });
     try {
       const id = await addMailboxRaw(s, { label: "Untrusted", host: "localhost", port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
-      const html = await (await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {})).text();
-      expect(html).not.toMatch(/Connected\./);
-      expect(html).toMatch(/certificate/i);
+      const t = await testMailbox(s, id);
+      expect(t.ok).toBe(false);
+      expect(t.message).not.toMatch(/Connected\./);
+      expect(t.message).toMatch(/certificate/i);
       const { tokens } = await obtainToken(s, [[id, "read"]]);
       const mcp = await new Mcp(s.base, tokens.access_token).connect();
       const r = await mcp.call("list_folders", { mailbox: id });
@@ -239,8 +253,9 @@ describe.skipIf(!haveOpenssl)("TLS validation and SSRF policy on mailbox connect
     try {
       const pw = "PlainPw-" + randomBytes(6).toString("hex");
       const id = await addMailboxRaw(s, { label: "Plain", host: "localhost", port, user: "u", pass: pw });
-      const html = await (await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {})).text();
-      expect(html).not.toMatch(/Connected\./);
+      const t = await testMailbox(s, id);
+      expect(t.ok).toBe(false);
+      expect(JSON.stringify(t)).not.toContain(pw);
       const { tokens } = await obtainToken(s, [[id, "read"]]);
       const mcp = await new Mcp(s.base, tokens.access_token).connect();
       const r = await mcp.call("list_folders", { mailbox: id });
@@ -260,9 +275,9 @@ describe.skipIf(!haveOpenssl)("TLS validation and SSRF policy on mailbox connect
     try {
       for (const host of ["localhost", "127.0.0.1", "169.254.169.254", "10.0.0.5", "[::1]"]) {
         const id = await addMailboxRaw(s, { label: host, host, port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
-        const html = await (await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {})).text();
-        expect(html, host).not.toMatch(/Connected\./);
-        expect(html, host).toMatch(/ALLOW_PRIVATE_HOSTS|private/i);
+        const t = await testMailbox(s, id);
+        expect(t.ok, host).toBe(false);
+        expect(t.message, host).toMatch(/ALLOW_PRIVATE_HOSTS|private/i);
         const { tokens } = await obtainToken(s, [[id, "read"]]);
         const mcp = await new Mcp(s.base, tokens.access_token).connect();
         expect((await mcp.call("list_folders", { mailbox: id })).isError, host).toBe(true);
@@ -276,9 +291,9 @@ describe.skipIf(!haveOpenssl)("TLS validation and SSRF policy on mailbox connect
     const s = await createStack({ accounts: [ALICE], skipMailboxes: true, env: { ALLOW_PRIVATE_HOSTS: "localhost" } });
     try {
       const ok = await addMailboxRaw(s, { label: "ok", host: "localhost", port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
-      expect(await (await s.admin.postWithCsrf(`/mailboxes/${ok}`, `/mailboxes/${ok}/test`, {})).text()).toMatch(/Connected\./);
+      expect((await testMailbox(s, ok)).ok).toBe(true);
       const ip = await addMailboxRaw(s, { label: "ip", host: "127.0.0.1", port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
-      expect(await (await s.admin.postWithCsrf(`/mailboxes/${ip}`, `/mailboxes/${ip}/test`, {})).text()).not.toMatch(/Connected\./);
+      expect((await testMailbox(s, ip)).ok).toBe(false);
     } finally { await s.teardown(); }
   });
 });
@@ -291,29 +306,30 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
     try {
       expect(bootstrapTokenFrom(srv.output())).toBe(fixed);
       const b = new Browser(srv.baseUrl);
-      // before setup
-      expect((await b.get("/login")).headers.get("location")).toBe("/setup");
-      expect((await b.get("/dashboard")).status).toBe(302);
-      expect((await b.get("/setup")).status).toBe(200);
+      // before setup: the SPA is told to go to /setup, and nothing else is reachable
+      const before = await b.session();
+      expect(before).toMatchObject({ setupRequired: true, authenticated: false });
+      expect((await b.get("/api/overview")).status).toBe(401);
       const pw = "Correct-Horse-" + randomBytes(5).toString("hex");
-      const bad = await b.postWithCsrf("/setup", "/setup", { token: "wrong-token", password: pw, password2: pw });
+      const bad = await b.postWithCsrf("/api/setup", { token: "wrong-token", password: pw, password2: pw });
       expect(bad.status).toBe(403);
-      expect((await b.postWithCsrf("/setup", "/setup", { token: fixed, password: "short", password2: "short" })).status).toBe(400);
-      expect((await b.postWithCsrf("/setup", "/setup", { token: fixed, password: pw, password2: pw + "x" })).status).toBe(400);
-      expect((await b.get("/dashboard")).status).toBe(302); // still not logged in
-      const good = await b.postWithCsrf("/setup", "/setup", { token: fixed, password: pw, password2: pw });
-      expect(good.status).toBe(302);
-      expect((await b.get("/dashboard")).status).toBe(200); // logged in after setup
+      expect((await b.postWithCsrf("/api/setup", { token: fixed, password: "short", password2: "short" })).status).toBe(400);
+      expect((await b.postWithCsrf("/api/setup", { token: fixed, password: pw, password2: pw + "x" })).status).toBe(400);
+      expect((await b.get("/api/overview")).status).toBe(401); // still not logged in
+      expect((await b.session()).setupRequired).toBe(true);
+      const good = await b.postWithCsrf("/api/setup", { token: fixed, password: pw, password2: pw });
+      expect(good.status).toBe(204);
+      expect((await b.get("/api/overview")).status).toBe(200); // logged in after setup
+      expect(await b.session()).toMatchObject({ setupRequired: false, authenticated: true });
 
       // afterwards: unreachable
       const fresh = new Browser(srv.baseUrl);
-      expect((await fresh.get("/setup")).status).toBe(404);
+      expect((await fresh.session()).setupRequired).toBe(false);
       const attacker = "Attacker-" + randomBytes(5).toString("hex");
-      const csrf = await fresh.csrf("/login");
-      const post = await fresh.post("/setup", { _csrf: csrf, token: fixed, password: attacker, password2: attacker });
-      expect(post.status).toBeGreaterThanOrEqual(400);
-      expect((await adminLogin(new Browser(srv.baseUrl), attacker)).headers.get("location")).toMatch(/error/);
-      expect((await adminLogin(new Browser(srv.baseUrl), pw)).headers.get("location")).toBe("/");
+      const post = await fresh.postWithCsrf("/api/setup", { token: fixed, password: attacker, password2: attacker });
+      expect(post.status).toBe(404);
+      expect((await adminLogin(new Browser(srv.baseUrl), attacker)).status).toBe(401);
+      expect((await adminLogin(new Browser(srv.baseUrl), pw)).status).toBe(204);
     } finally { await srv.stop(); w.cleanup(); }
   });
 
@@ -334,72 +350,94 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
 
     it("unauthenticated visitors cannot use any admin route", async () => {
       const anon = new Browser(s.base);
-      for (const p of ["/dashboard", "/mailboxes/new", `/mailboxes/${mailboxId}`, `/clients/${clientId}`]) {
+      for (const p of ["/api/overview", `/api/mailboxes/${mailboxId}`, `/api/clients/${clientId}`, "/api/audit", "/api/audit/export.jsonl", "/api/audit/export.csv"]) {
         const r = await anon.get(p);
-        expect(r.status, p).toBe(302);
-        expect(r.headers.get("location"), p).toBe("/login");
+        expect(r.status, p).toBe(401);
+        expect((await errorOf(r)).code, p).toBeTruthy();
       }
-      const csrf = await anon.csrf("/login");
-      for (const p of ["/mailboxes", `/clients/${clientId}/grants`, `/tokens/${revokeId}/revoke`, `/mailboxes/${mailboxId}/delete`]) {
-        const r = await anon.post(p, { _csrf: csrf });
-        expect(r.status, p).toBeGreaterThanOrEqual(400);
+      // with a perfectly valid CSRF token of their own anonymous session, mutations are still refused
+      const mutations: Array<[string, string, unknown]> = [
+        ["POST", "/api/mailboxes", { label: "evil", host: "localhost", port: 993, username: "u", password: "p" }],
+        ["PUT", `/api/clients/${clientId}/grants`, { grants: [{ mailboxId, capability: "organize" }] }],
+        ["POST", `/api/tokens/${revokeId}/revoke`, {}],
+        ["DELETE", `/api/mailboxes/${mailboxId}`, { confirmLabel: "Box alice" }],
+        ["POST", `/api/clients/${clientId}/disable`, {}],
+      ];
+      for (const [method, p, body] of mutations) {
+        const r = await anon.withCsrf(method, p, body);
+        expect(r.status, `${method} ${p}`).toBe(401);
       }
       expect(s.srv.db().prepare("SELECT COUNT(*) n FROM mailboxes").get()).toEqual({ n: 1 });
       // consent screen also needs the owner
       const c = await consent(anon, s.base, { clientId, grants: [[mailboxId, "read"]] });
-      expect(c.location).toMatch(/login|status:/);
+      expect(c.location).toBe("status:401");
     });
 
-    it("CSRF: state-changing POSTs without a valid token are refused and change nothing", async () => {
+    it("CSRF: state-changing requests without a valid token are refused and change nothing", async () => {
       const before = {
         mailboxes: s.srv.db().prepare("SELECT COUNT(*) n FROM mailboxes").get(),
         grants: s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules").get(),
       };
       const otherSession = new Browser(s.base);
-      await adminLogin(otherSession, s.adminPassword);
-      const foreignToken = await otherSession.csrf(`/clients/${clientId}`); // the dashboard itself has no form any more
-      await s.admin.get(`/clients/${clientId}`); // make sure this session has its own token
+      expect((await adminLogin(otherSession, s.adminPassword)).status).toBe(204);
+      const foreignToken = await otherSession.csrf();
+      const ownToken = await s.admin.csrf(); // make sure this session has its own token
+      expect(foreignToken).not.toBe(ownToken);
 
-      const attempts: Array<[string, Record<string, string>, Record<string, string>?]> = [
-        ["/mailboxes", { label: "evil", host: "localhost", port: "993", username: "u", password: "p" }],
-        [`/mailboxes/${mailboxId}/delete`, {}],
-        [`/mailboxes/${mailboxId}`, { label: "renamed", host: "localhost", port: "993", username: "u", password: "" }],
-        [`/clients/${clientId}/grants`, { [`g_${mailboxId}_organize`]: "1" }],
-        [`/clients/${clientId}/disable`, {}],
-        [`/tokens/${revokeId}/revoke`, {}],
-        ["/logout", {}],
+      const attempts: Array<[string, string, unknown]> = [
+        ["POST", "/api/mailboxes", { label: "evil", host: "localhost", port: 993, username: "u", password: "p" }],
+        ["DELETE", `/api/mailboxes/${mailboxId}`, { confirmLabel: "Box alice" }],
+        ["PATCH", `/api/mailboxes/${mailboxId}`, { label: "renamed", host: "localhost", port: 993, username: "u" }],
+        ["PUT", `/api/clients/${clientId}/grants`, { grants: [{ mailboxId, capability: "organize" }] }],
+        ["POST", `/api/clients/${clientId}/rules`, { mailboxId, folder: "*", operation: "search", effect: "allow" }],
+        ["POST", `/api/clients/${clientId}/disable`, {}],
+        ["POST", `/api/clients/${clientId}/revoke`, {}],
+        ["POST", `/api/tokens/${revokeId}/revoke`, {}],
+        ["POST", "/api/logout", {}],
       ];
-      for (const [path, form] of attempts) {
-        const none = await s.admin.post(path, form, { origin: "https://evil.example" });
-        expect(none.status, `${path} without token`).toBe(403);
-        const wrong = await s.admin.post(path, { _csrf: "A".repeat(43), ...form });
-        expect(wrong.status, `${path} wrong token`).toBe(403);
-        const foreign = await s.admin.post(path, { _csrf: foreignToken, ...form });
-        expect(foreign.status, `${path} token from another session`).toBe(403);
+      for (const [method, path, body] of attempts) {
+        const label = `${method} ${path}`;
+        const none = await s.admin.req(method, path, { json: body, headers: { origin: "https://evil.example" } });
+        expect(none.status, `${label} without token`).toBe(403);
+        expect((await errorOf(none)).code, label).toBe("csrf");
+        const wrong = await s.admin.req(method, path, { json: body, headers: { "x-csrf-token": "A".repeat(43) } });
+        expect(wrong.status, `${label} wrong token`).toBe(403);
+        const foreign = await s.admin.req(method, path, { json: body, headers: { "x-csrf-token": foreignToken } });
+        expect(foreign.status, `${label} token from another session`).toBe(403);
+        // a cross-site <form> can only send simple content types: the right token with the wrong type must fail too
+        const form = await s.admin.req(method, path, { body: JSON.stringify(body), contentType: "text/plain", headers: { "x-csrf-token": ownToken } });
+        expect(form.status, `${label} text/plain`).toBe(403);
+        // and the token must travel in the header, never in the JSON body (the old _csrf form field is gone)
+        const inBody = await s.admin.req(method, path, { json: { _csrf: ownToken, ...(body as object) } });
+        expect(inBody.status, `${label} token in body`).toBe(403);
       }
       // the consent POST too
-      const consentNoCsrf = await s.admin.post("/oauth/authorize", { client_id: clientId, redirect_uri: REDIRECT, response_type: "code", decision: "approve", [`g_${mailboxId}_read`]: "1" });
+      const consentNoCsrf = await s.admin.post("/api/oauth/authorize", { params: { client_id: clientId, redirect_uri: REDIRECT, response_type: "code" }, decision: "approve", grants: [{ mailboxId, capability: "read" }] });
       expect(consentNoCsrf.status).toBe(403);
-      expect(consentNoCsrf.headers.get("location")).toBeNull();
-      // login form too
-      expect((await new Browser(s.base).post("/login", { password: s.adminPassword })).status).toBe(403);
+      expect(await consentNoCsrf.text()).not.toContain("redirectTo");
+      // login too
+      expect((await new Browser(s.base).post("/api/login", { password: s.adminPassword })).status).toBe(403);
 
       expect(s.srv.db().prepare("SELECT COUNT(*) n FROM mailboxes").get()).toEqual(before.mailboxes);
       expect(s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules").get()).toEqual(before.grants);
       expect(s.srv.db().prepare("SELECT revoked FROM oauth_tokens WHERE id = ?").get(revokeId)).toEqual({ revoked: 0 });
+      expect(s.srv.db().prepare("SELECT disabled FROM oauth_clients WHERE client_id = ?").get(clientId)).toEqual({ disabled: 0 });
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(200);
-      expect((await s.admin.get("/dashboard")).status).toBe(200); // still logged in
+      expect((await s.admin.get("/api/overview")).status).toBe(200); // still logged in
     });
 
     it("session cookie is HttpOnly + SameSite=Lax, and security headers are present", async () => {
       const b = new Browser(s.base);
-      const res = await b.get("/login");
-      const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith("imap2mcp.sid") || /sid/i.test(c)) ?? "";
+      const res = await b.get("/api/session");
+      const cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith("imap2mcp.sid")) ?? "";
       expect(cookie).toMatch(/HttpOnly/i);
       expect(cookie).toMatch(/SameSite=Lax/i);
+      expect(cookie).toMatch(/Path=\//i);
+      expect(cookie).not.toMatch(/;\s*Secure/i); // BASE_URL is http in this fixture
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(res.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
+      expect(res.headers.get("cache-control")).toMatch(/no-store/);
     });
 
     it("login is rate limited", async () => {
@@ -409,23 +447,31 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
         const tok = await waitFor(() => bootstrapTokenFrom(srv.output()));
         const setup = new Browser(srv.baseUrl);
         const pw = "Admin-" + randomBytes(6).toString("hex");
-        await setup.postWithCsrf("/setup", "/setup", { token: tok, password: pw, password2: pw });
+        expect((await setup.postWithCsrf("/api/setup", { token: tok, password: pw, password2: pw })).status).toBe(204);
         const b = new Browser(srv.baseUrl);
         const codes: number[] = [];
         for (let i = 0; i < 14; i++) codes.push((await adminLogin(b, "wrong-" + i)).status);
         expect(codes).toContain(429);
         // even the right password is held back once limited
-        expect((await adminLogin(b, pw)).status).toBe(429);
+        const held = await adminLogin(b, pw);
+        expect(held.status).toBe(429);
+        expect(held.headers.get("retry-after")).toMatch(/^\d+$/);
+        expect((await errorOf(held)).code).toBeTruthy();
       } finally { await srv.stop(); w.cleanup(); }
     });
 
-    it("the mailbox secret and token hashes are not exposed through any admin page", async () => {
-      const pages = ["/dashboard", `/mailboxes/${mailboxId}`, `/clients/${clientId}`];
-      for (const p of pages) {
-        const html = await (await s.admin.get(p)).text();
-        expect(html, p).not.toContain(s.imapPasswords[ALICE]);
-        expect(html, p).not.toContain(tokens.access_token);
-        expect(html, p).not.toContain(sha256hex(tokens.access_token));
+    it("the mailbox secret and token hashes are not exposed through any admin endpoint", async () => {
+      const paths = ["/api/overview", `/api/mailboxes/${mailboxId}`, `/api/clients/${clientId}`, "/api/audit", "/api/session"];
+      for (const p of paths) {
+        const text = await (await s.admin.get(p)).text();
+        expect(text, p).not.toContain(s.imapPasswords[ALICE]);
+        expect(text, p).not.toContain(tokens.access_token);
+        expect(text, p).not.toContain(tokens.refresh_token);
+        expect(text, p).not.toContain(sha256hex(tokens.access_token));
+        expect(text, p).not.toContain(sha256hex(tokens.refresh_token));
+        expect(text, p).not.toContain(s.work.sessionSecret);
+        expect(text, p).not.toContain(s.work.keyHex);
+        expect(text, p).not.toMatch(/v1:[0-9a-f]{8}:/);
       }
     });
   });
@@ -434,3 +480,4 @@ describe.skipIf(!haveOpenssl)("admin bootstrap, CSRF, sessions", () => {
 void existsSync;
 void registerClient;
 void msg;
+void json;

@@ -45,6 +45,8 @@ The container restarts automatically (`restart: unless-stopped`); `docker compos
 | Rate-limit `429` hits everyone at once | The proxy does not forward the client address (`X-Forwarded-For`), so all requests share the proxy's IP. |
 | MCP calls hang or arrive in one piece late | Response buffering in the proxy. Disable it (`flush_interval -1` / `proxy_buffering off`). |
 | `401` on every `/mcp` call after changing the domain | Tokens are bound to `BASE_URL`; clients must re-authorize. |
+| The admin UI shows a blank page or its files under `/_nuxt/` return 404 | The UI is built for the root path of the host. Serve the bridge at `https://host/` (no path prefix) and proxy every path, including `/_nuxt/*`, `/api/*` and `/oauth/authorize`, to the app. A blank page with a Content-Security-Policy error in the browser console usually means the proxy rewrote or injected HTML (the CSP allows only the app's own scripts). |
+| Admin actions fail with `403` and error code `csrf` ("session expired" style message) | The session cookie was not sent (cookie not kept, see the first row), the session ended (logout in another tab, `SESSION_SECRET` changed, 24 h expiry), or a proxy strips the `X-CSRF-Token` header. Reload the page; if it persists, fix the proxy. |
 | Browser shows the page but `/readyz` is 429 | More than 120 health requests per minute from one address; lower the probe frequency. |
 
 ## Mailboxes and tools
@@ -65,6 +67,6 @@ The container restarts automatically (`restart: unless-stopped`); `docker compos
 
 ## Misc
 
-- `Warning: connect.session() MemoryStore is not designed for a production environment` at startup is expected: sessions live in memory and are lost on restart (you log in again after every restart or recreate; OAuth tokens are unaffected). It is harmless for a single-owner, single-process deployment.
+- Admin sessions are sealed cookies (no server-side session store, so there is no `MemoryStore` warning and a restart does not sign you out). You are signed out when the 24 h cookie expires, after you log out, or when `SESSION_SECRET` changes; OAuth tokens are unaffected. The first start of the Nuxt release after the Express release asks for one fresh login (UPGRADING.md).
 - Increase log detail with `LOG_LEVEL=debug` in `.env`, then `docker compose up -d` (not `restart`: that keeps the old environment). Secrets stay redacted.
 - Docker reports `unhealthy` only for failed liveness (`/healthz`). A wrong key does not make the container unhealthy on purpose; look at `/readyz`.

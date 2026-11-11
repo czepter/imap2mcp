@@ -5,9 +5,9 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { ensureBuild, SERVER_ENTRY } from "./build.js";
 
 export const REPO = resolve(import.meta.dirname, "../..");
-
 export async function freePort(): Promise<number> {
   return new Promise((res, rej) => {
     const s = createServer();
@@ -58,14 +58,18 @@ export interface StartOpts {
   expectExit?: boolean;
 }
 
-/** Spawns the real server (`tsx src/index.ts`) as a child process on a free port. */
+/**
+ * Spawns the real server (`node .output/server/index.mjs`, built by `nuxt build`) as a child process on a free port.
+ * The build runs once, lazily, when the output is missing or stale (test/globalSetup.ts normally did it already).
+ */
 export async function startServer(o: StartOpts): Promise<RunningServer> {
+  await ensureBuild();
   const port = o.port ?? (await freePort());
   const baseUrl = `http://127.0.0.1:${port}`;
   const env: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
-    NODE_ENV: "test",
+    NODE_ENV: "production",
     PORT: String(port),
     BASE_URL: baseUrl,
     DATA_DIR: o.work.dataDir,
@@ -78,11 +82,11 @@ export async function startServer(o: StartOpts): Promise<RunningServer> {
   };
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
 
-  const proc = spawn(process.execPath, [resolve(REPO, "node_modules/tsx/dist/cli.mjs"), resolve(REPO, "src/index.ts")], {
-    cwd: REPO,
+  const proc = spawn(process.execPath, [SERVER_ENTRY], {
+    cwd: REPO, // migrations (drizzle/) and the sidecar binary are resolved relative to the working directory
     env: env as NodeJS.ProcessEnv,
     stdio: ["ignore", "pipe", "pipe"],
-    detached: true, // own process group: tsx spawns the real server as a child, so stop() must signal the whole group
+    detached: true, // own process group: the server spawns the Go sidecar, so stop() must signal the whole group
   });
   const killGroup = (sig: NodeJS.Signals) => { try { process.kill(-proc.pid!, sig); } catch { /* already gone */ } };
   let out = "";

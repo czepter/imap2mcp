@@ -7,3 +7,9 @@ data/*.db-shm
 .env
 secrets/
 data/backups/
+
+# Nuxt / Nitro
+.nuxt/
+.output/
+.data/
+nuxt.d.ts

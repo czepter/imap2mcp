@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
-import { assertOp, isOpAllowed, filterAllowedFolders, anyAllowedMailboxes, assertAllowed, allowedMailboxes } from "../../src/policy/policy.js";
-import { folderMatches, isValidSelector, OPERATIONS, type Operation } from "../../src/policy/rules.js";
-import { PolicyError, type Capability, type TokenContext } from "../../src/types.js";
+import { assertOp, isOpAllowed, filterAllowedFolders, anyAllowedMailboxes, assertAllowed, allowedMailboxes } from "../../server/core/policy/policy.js";
+import { folderMatches, isValidSelector, OPERATIONS, type Operation } from "../../server/core/policy/rules.js";
+import { PolicyError, type Capability, type TokenContext } from "../../server/core/types.js";
 
 let db: Database.Database;
 let n = 0;

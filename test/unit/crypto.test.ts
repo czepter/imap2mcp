@@ -3,8 +3,8 @@ import { writeFileSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
-import { loadMasterKey, initCrypto, resetCrypto, encrypt, decrypt } from "../../src/imap/crypto.js";
-import { loadConfig } from "../../src/config.js";
+import { loadMasterKey, initCrypto, resetCrypto, encrypt, decrypt } from "../../server/core/imap/crypto.js";
+import { loadConfig } from "../../server/core/config.js";
 
 const HEX = "ab".repeat(32);
 const OTHER = "cd".repeat(32);

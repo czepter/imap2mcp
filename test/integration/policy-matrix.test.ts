@@ -156,8 +156,9 @@ describe.skipIf(!haveOpenssl)("policy: default deny and the client x mailbox x c
       const { tokens } = await obtainToken(s, [[id, "read"]]);
       const c = await new Mcp(s.base, tokens.access_token).connect();
       expect((await c.call("list_folders", { mailbox: id })).isError).toBe(false);
-      const r = await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/delete`, {});
-      expect(r.status).toBe(302);
+      const label = ((await (await s.admin.get(`/api/mailboxes/${id}`)).json()) as any).mailbox.label;
+      const r = await s.admin.delWithCsrf(`/api/mailboxes/${id}`, { confirmLabel: label });
+      expect(r.status).toBe(204);
       expect((await c.call("list_folders", { mailbox: id })).data.code).toBe("FORBIDDEN");
       expect(s.srv.db().prepare("SELECT COUNT(*) n FROM policy_rules WHERE mailbox_id = ?").get(id)).toEqual({ n: 0 });
       await c.close();

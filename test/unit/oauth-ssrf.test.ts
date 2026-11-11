@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
-import { verifyPKCE } from "../../src/oauth/pkce.js";
-import { validRedirectUri, scopesToCaps, capsToScopes } from "../../src/oauth/common.js";
-import { isPrivateAddress } from "../../src/imap/ssrf.js";
-import { loadConfig, ConfigError } from "../../src/config.js";
-import { validateFlags } from "../../src/mcp/tools.js";
+import { verifyPKCE } from "../../server/core/oauth/pkce.js";
+import { validRedirectUri, scopesToCaps, capsToScopes } from "../../server/core/oauth/common.js";
+import { isPrivateAddress } from "../../server/core/imap/ssrf.js";
+import { loadConfig, ConfigError } from "../../server/core/config.js";
+import { validateFlags } from "../../server/core/mcp/tools.js";
 
 describe("PKCE", () => {
   const v = "a".repeat(43);

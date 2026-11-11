@@ -1,5 +1,7 @@
 # v1 Design Contract — Precision and performance
 
+> **Note (Nuxt migration):** this is the v1 design as it was written. Paths such as `src/...`, and mentions of Express, server-rendered pages, `src/web/**` or middleware, describe the code at that time. The domain code now lives in `server/core/`, the admin UI is a Nuxt single-page app over a JSON API (`/api`, header-token CSRF, sealed-cookie sessions) and the server is Nitro; see `docs/NUXT_MIGRATION.md` and `README.md`. The protocol, policy, audit and storage decisions below are unchanged; decisions about the admin UI and its web security are superseded by the migration document.
+
 Binding for v1 work. Inherits `docs/DESIGN_V0.md` and every v0 gate (all 208 tests must keep passing or be
 deliberately updated). Source: `docs/VERSION_PLAN.md` Version 1, `docs/PRD.md` FR-12..16, §10 v1.
 

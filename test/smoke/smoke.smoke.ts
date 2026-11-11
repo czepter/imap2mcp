@@ -15,7 +15,7 @@ import { FakeImapServer } from "../helpers/fakeImap.js";
 import { Browser } from "../helpers/http.js";
 import { bootstrapTokenFrom, freePort } from "../helpers/server.js";
 import { addMailbox, Mcp, obtainToken, type Stack } from "../helpers/stack.js";
-import { encrypt, initCrypto } from "../../src/imap/crypto.js";
+import { encrypt, initCrypto } from "../../server/core/imap/crypto.js";
 
 const REPO = resolve(import.meta.dirname, "../..");
 const IMAGE = process.env.SMOKE_IMAGE || "imap2mcp:smoke";
@@ -214,6 +214,24 @@ describe.skipIf(!!skipReason)("container smoke", () => {
     docker(["exec", c.name, ...hc.Test.slice(1)]);
   });
 
+  it("serves the SPA shell and its built assets, with the security headers", async () => {
+    const root = await fetch(`${c.base}/`);
+    expect(root.status).toBe(200);
+    expect(root.headers.get("content-type")).toMatch(/text\/html/);
+    expect(root.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
+    expect(root.headers.get("x-frame-options")).toBe("DENY");
+    const html = await root.text();
+    const assets = [...html.matchAll(/(?:src|href)="(\/_nuxt\/[^"]+)"/g)].map((m) => m[1]);
+    expect(assets.length, "the SPA index references no /_nuxt assets: was the image built from `nuxt build`?").toBeGreaterThan(0);
+    for (const a of assets) expect((await fetch(`${c.base}${a}`)).status, a).toBe(200);
+    // deep links fall back to the SPA index; unknown API paths are JSON 404s
+    expect((await fetch(`${c.base}/dashboard`)).headers.get("content-type")).toMatch(/text\/html/);
+    const api = await fetch(`${c.base}/api/nope`);
+    expect(api.status).toBe(404);
+    expect(api.headers.get("content-type")).toMatch(/json/);
+    expect((await (await fetch(`${c.base}/api/session`)).json()).setupRequired).toBe(true);
+  });
+
   it("health endpoints are rate limited", async () => {
     // Separate throwaway container so the main one keeps a clean budget.
     const t = await run("i2m-smoke-rl", { dataDir: newDataDir(), keyFile, caFile });
@@ -231,9 +249,10 @@ describe.skipIf(!!skipReason)("container smoke", () => {
     const token = bootstrapTokenFrom(logs(c));
     expect(token, "bootstrap token missing from container log").toBeTruthy();
     const admin = new Browser(c.base);
-    const setup = await admin.postWithCsrf("/setup", "/setup", { token: token!, password: adminPassword, password2: adminPassword });
-    expect(setup.status).toBe(302);
-    expect((await fetch(`${c.base}/setup`)).status).toBe(404);
+    const setup = await admin.postWithCsrf("/api/setup", { token: token!, password: adminPassword, password2: adminPassword });
+    expect(setup.status).toBe(204);
+    expect((await admin.session()).setupRequired).toBe(false);
+    expect((await admin.postWithCsrf("/api/setup", { token: token!, password: adminPassword, password2: adminPassword })).status).toBe(404);
 
     const shim = { admin, base: c.base } as unknown as Stack;
     mailboxId = await addMailbox(shim, { label: "Smoke", host: HOST, port: fake.port, user, pass: imapPw });
@@ -265,12 +284,12 @@ describe.skipIf(!!skipReason)("container smoke", () => {
     c = await run("i2m-smoke-main", { dataDir, keyFile, caFile });
     await waitHealthz(c);
     expect((await waitReady(c)).status).toBe(200);
-    expect((await fetch(`${c.base}/setup`)).status).toBe(404); // admin persisted; no new bootstrap
+    expect((await (await fetch(`${c.base}/api/session`)).json()).setupRequired).toBe(false); // admin persisted; no new bootstrap
     expect(bootstrapTokenFrom(logs(c))).toBeNull();
 
     const admin = new Browser(c.base);
-    const login = await admin.postWithCsrf("/login", "/login", { password: adminPassword });
-    expect(login.status).toBe(302);
+    const login = await admin.postWithCsrf("/api/login", { password: adminPassword });
+    expect(login.status).toBe(204);
     // the token is bound to BASE_URL; the port is new, so a fresh token is needed. Persistence is shown by the mailbox.
     const { tokens } = await obtainToken({ admin, base: c.base } as unknown as Stack, [[mailboxId, "read"]]);
     const mcp = await new Mcp(c.base, tokens.access_token).connect();
@@ -296,16 +315,16 @@ describe.skipIf(!!skipReason)("container smoke", () => {
     expect(body.checks.key).toBe("fail");
     expect(body.checks.db).toBe("ok");
     const admin = new Browser(w.base);
-    expect((await admin.postWithCsrf("/login", "/login", { password: adminPassword })).status).toBe(302);
+    expect((await admin.postWithCsrf("/api/login", { password: adminPassword })).status).toBe(204);
     const { tokens } = await obtainToken({ admin, base: w.base } as unknown as Stack, [[mailboxId, "read"]]);
     const mcp = await new Mcp(w.base, tokens.access_token).connect();
     const folders = await mcp.call("list_folders", { mailbox: mailboxId });
     expect(folders.isError).toBe(true);
     await mcp.close();
     // docs/RECOVERY.md "lost key": re-entering the mailbox password in the UI re-encrypts it under the configured key
-    const edit = await admin.postWithCsrf(`/mailboxes/${mailboxId}`, `/mailboxes/${mailboxId}`,
-      { label: "Smoke", host: HOST, port: String(fake.port), username: user, password: imapPw });
-    expect(edit.status).toBe(302);
+    const edit = await admin.patchWithCsrf(`/api/mailboxes/${mailboxId}`,
+      { label: "Smoke", host: HOST, port: fake.port, username: user, password: imapPw });
+    expect(edit.status).toBe(200);
     expect((await waitReady(w)).status).toBe(200);
     const log = logs(w);
     for (const s of [wrongHex, keyHex, imapPw]) expect(log).not.toContain(s);

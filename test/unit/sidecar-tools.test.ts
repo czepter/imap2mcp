@@ -6,7 +6,7 @@ const rules: Record<string, string[]> = {
   Work: ["search", "read_headers"],
   Secret: [],
 };
-vi.mock("../../src/policy/policy.js", () => ({
+vi.mock("../../server/core/policy/policy.js", () => ({
   isOpAllowed: (_c: unknown, _m: string, f: string, op: string) => (rules[f] ?? []).includes(op),
   assertOp: (_c: unknown, _m: string, f: string, op: string) => {
     if (!(rules[f] ?? []).includes(op)) throw new (class extends Error { code = "FORBIDDEN"; name = "PolicyError" })();
@@ -29,16 +29,16 @@ const backend = {
   searchText: vi.fn(async () => ({ uidValidity: 7, uids: [] })),
   fetchHeaders: vi.fn(async (_m: string, folder: string, uv: number, uids: number[]) => {
     calls.push(`fetchHeaders:${folder}`);
-    if (uv !== 7) { const { ToolError } = await import("../../src/mcp/errors.js"); throw new ToolError("STALE_REFERENCE", "stale"); }
+    if (uv !== 7) { const { ToolError } = await import("../../server/core/mcp/errors.js"); throw new ToolError("STALE_REFERENCE", "stale"); }
     return uids.map((u) => hdr(u, "2026-01-01"));
   }),
   fetchBody: vi.fn(async () => { calls.push("fetchBody"); return { text: "hello", truncated: false }; }),
 };
-vi.mock("../../src/mcp/backend.js", () => ({ getBackend: () => backend }));
-vi.mock("../../src/sidecar/index.js", () => ({ sidecarEnabled: () => false, getSidecar: () => { throw new Error("no"); } }));
+vi.mock("../../server/core/mcp/backend.js", () => ({ getBackend: () => backend }));
+vi.mock("../../server/core/sidecar/index.js", () => ({ sidecarEnabled: () => false, getSidecar: () => { throw new Error("no"); } }));
 
 const ctx = { tokenId: "t", clientId: "c", scopes: ["read"] } as never;
-const { searchMessagesTool, readMessageTool, listFoldersTool } = await import("../../src/mcp/tools.js");
+const { searchMessagesTool, readMessageTool, listFoldersTool } = await import("../../server/core/mcp/tools.js");
 
 beforeEach(() => { calls.length = 0; });
 

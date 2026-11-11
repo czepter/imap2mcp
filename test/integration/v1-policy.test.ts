@@ -301,8 +301,8 @@ describe.skipIf(!ok)("v1 policy end to end", () => {
       const c = await fresh(allowAll(), "rev2");
       expect((await c.mcp.call("list_mailboxes")).isError).toBe(false);
       const t0 = Date.now();
-      const r = await s.admin.postWithCsrf(`/clients/${c.clientId}`, `/clients/${c.clientId}/disable`, {});
-      expect(r.status).toBe(302);
+      const r = await s.admin.postWithCsrf(`/api/clients/${c.clientId}/disable`);
+      expect(r.status).toBe(204);
       const after = await tryCall(c.mcp, "search_messages", { mailbox: box, folder: "INBOX", subject: "visible" });
       expect(Date.now() - t0).toBeLessThan(5000);
       expect(after.isError).toBe(true);
@@ -355,7 +355,7 @@ describe.skipIf(!ok)("v1 policy end to end", () => {
       const c = await fresh(allowAll(), "rev3");
       const m = await find(c, "INBOX", "inbox visible");
       expect((await c.mcp.call("read_message", { ref: m.ref })).isError).toBe(false);
-      await s.admin.postWithCsrf(`/clients/${c.clientId}`, `/clients/${c.clientId}/disable`, {});
+      expect((await s.admin.postWithCsrf(`/api/clients/${c.clientId}/disable`)).status).toBe(204);
       const t = await tryCall(c.mcp, "read_message", { ref: m.ref });
       expect(t.isError).toBe(true);
       await poll(async () => (await tryCall(c.mcp, "list_mailboxes")).isError, 5000);

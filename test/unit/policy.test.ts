@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
-import { assertAllowed, allowedMailboxes, anyAllowedMailboxes } from "../../src/policy/policy.js";
-import { PRESET_OPS } from "../../src/policy/rules.js";
-import { PolicyError, type Capability, type TokenContext } from "../../src/types.js";
+import { assertAllowed, allowedMailboxes, anyAllowedMailboxes } from "../../server/core/policy/policy.js";
+import { PRESET_OPS } from "../../server/core/policy/rules.js";
+import { PolicyError, type Capability, type TokenContext } from "../../server/core/types.js";
 
 const CAPS: Capability[] = ["read", "draft", "organize"];
 let db: Database.Database;

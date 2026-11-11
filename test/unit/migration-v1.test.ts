@@ -3,10 +3,10 @@ import Database from "better-sqlite3";
 import { readFileSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { migrationsFolder, openDatabase } from "../../src/db/database.js";
-import { assertOp, filterAllowedFolders, isOpAllowed, anyAllowedMailboxes } from "../../src/policy/policy.js";
-import { OPERATIONS, OP_CAPABILITY } from "../../src/policy/rules.js";
-import type { Capability, TokenContext } from "../../src/types.js";
+import { migrationsFolder, openDatabase } from "../../server/core/db/database.js";
+import { assertOp, filterAllowedFolders, isOpAllowed, anyAllowedMailboxes } from "../../server/core/policy/policy.js";
+import { OPERATIONS, OP_CAPABILITY } from "../../server/core/policy/rules.js";
+import type { Capability, TokenContext } from "../../server/core/types.js";
 
 const CAPS: Capability[] = ["read", "draft", "organize"];
 const FOLDERS = ["INBOX", "INBOX/Sub", "Archive", "Archive/2020/Q1", "Drafts", "Sent"];

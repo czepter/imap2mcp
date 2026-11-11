@@ -18,13 +18,19 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
 
-    client_max_body_size 2m;       # the app limits JSON/form bodies to 1 MB
+    client_max_body_size 2m;       # the app limits JSON bodies to 1 MB
+
+    # The admin UI is a single-page app. Its hashed files under /_nuxt/ come from the app with long-lived immutable
+    # cache headers (everything else is no-store); do not override Cache-Control here.
+    # Compress the SPA bundle (JS/CSS). text/event-stream is not in this list, so MCP streaming is untouched.
+    gzip on;
+    gzip_types text/css application/javascript text/javascript application/json image/svg+xml;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
 
-        # The app trusts exactly ONE proxy hop (express "trust proxy" = 1) when BASE_URL is https.
+        # The app trusts exactly ONE proxy hop (the last X-Forwarded-For entry) when BASE_URL is https.
         # Overwrite, never append, so a client cannot inject its own forwarding headers.
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;

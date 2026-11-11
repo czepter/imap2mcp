@@ -185,14 +185,16 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     expect((await search()).isError).toBe(false);
 
     // 3) the admin page shows the state and offers Retry
-    const page = await (await s.admin.get(`/mailboxes/${bobBox}`)).text();
-    expect(page).toMatch(/Authentication failed/i);
-    expect(page).toContain(`/mailboxes/${bobBox}/retry`);
+    const detail = (await (await s.admin.get(`/api/mailboxes/${bobBox}`)).json()) as any;
+    expect(detail.status.status).toBe("auth_failed");
+    expect(typeof detail.status.lastErrorCode === "string" && detail.status.lastErrorCode.length > 0).toBe(true);
+    const ov = (await (await s.admin.get("/api/overview")).json()) as any;
+    expect(ov.mailboxes.find((m: any) => m.id === bobBox).status).toBe("auth_failed");
 
     // 4) Retry while the server still rejects: one more bounded attempt, then latched again (no loop)
     const t1 = Date.now();
     const rr = await uiRetry(s, bobBox);
-    expect(rr.status).toBe(302);
+    expect(rr.status).toBe(204);
     await sleep(6_000);
     expect(s.fake.loginAttemptsSince(t1, BOB), "a Retry causes a bounded number of attempts").toBeLessThanOrEqual(4);
     await until(async () => (await cBob.mcp.call("list_folders", { mailbox: bobBox })).data?.code === "AUTH_FAILED", 15_000, "latched again");
@@ -202,7 +204,7 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
 
     // 5) the provider is fixed + Retry => resumes
     s.fake.rejectLogins = false;
-    expect((await uiRetry(s, bobBox)).status).toBe(302);
+    expect((await uiRetry(s, bobBox)).status).toBe(204);
     await until(async () => !(await cBob.mcp.call("list_folders", { mailbox: bobBox })).isError, 20_000, "tools work after Retry");
     await until(() => mailboxStatus(s, bobBox).status === "ok", 15_000, "status ok after Retry");
   });
@@ -217,7 +219,7 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     await sleep(5_000);
     expect(s.fake.loginAttemptsSince(t0, BOB)).toBe(settled);
     const r = await uiEditCredentials(s, bobBox, BOB, newPw);
-    expect(r.status).toBe(302);
+    expect(r.status).toBe(200);
     await until(async () => !(await cBob.mcp.call("list_folders", { mailbox: bobBox })).isError, 20_000, "tools work after credential edit");
     await until(() => mailboxStatus(s, bobBox).status === "ok", 15_000, "status ok after edit");
     // the (encrypted) stored password was replaced, not the plaintext leaked into logs

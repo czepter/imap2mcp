@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SidecarClient } from "../../src/sidecar/client.js";
-import { SidecarRpcError, SidecarTimeoutError, SidecarUnavailableError } from "../../src/sidecar/errors.js";
+import { SidecarClient } from "../../server/core/sidecar/client.js";
+import { SidecarRpcError, SidecarTimeoutError, SidecarUnavailableError } from "../../server/core/sidecar/errors.js";
 
 let dir: string;
 let sockPath: string;

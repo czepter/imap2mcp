@@ -23,10 +23,11 @@ Step-by-step installation: `docs/INSTALL.md`. Upgrades and rollback: `docs/UPGRA
 | `BASE_URL` | yes (production) | `http://localhost:3000` | Public URL. OAuth issuer; MCP resource/audience is `${BASE_URL}/mcp`. `https` enables `Secure` cookies, HSTS and trusts one proxy hop. |
 | `ENCRYPTION_KEY_FILE` | one of the two | none | Path of a file holding the 32-byte master key (64 hex chars or base64). Preferred. |
 | `ENCRYPTION_KEY` | one of the two | none | The same key inline (64 hex chars). Leaks into process listings; avoid. |
-| `SESSION_SECRET` | yes (or `SESSION_SECRET_FILE`) | none | Cookie signing secret, at least 32 characters. |
+| `SESSION_SECRET` | yes (or `SESSION_SECRET_FILE`) | none | Seals (encrypts and signs) the admin session cookie, at least 32 characters. Changing it signs every admin out. |
 | `SESSION_SECRET_FILE` | alternative | none | Path of a file holding the session secret (trimmed; same 32-character minimum). Used only when `SESSION_SECRET` is unset. Suited to Docker/Kubernetes secrets. |
 | `DATA_DIR` | no | `./data` (`/app/data` in the image) | `bridge.db` (+WAL), `backups/`, `sidecar.sock`. |
-| `PORT` | no | `3000` | Listen port inside the process/container. |
+| `PORT` | no | `3000` | Listen port inside the process/container (Nitro reads `PORT`; do not also set `NITRO_PORT`, which would win over it and diverge from the health check). |
+| `HOST` | no | `0.0.0.0` (set by the image) | Listen address of the Nitro server (`NITRO_HOST` wins if set). |
 | `HOST_PORT` | no (compose) | `3000` | Port published on `127.0.0.1` by `docker-compose.yml`. |
 | `REGISTRATION_MODE` | no | `dynamic` | `dynamic` (RFC 7591, grants nothing) or `admin` (clients created in the UI only). |
 | `ALLOW_PRIVATE_HOSTS` | no | empty | Comma list of mailbox host names allowed to resolve to private/loopback addresses (exact match). |
@@ -47,6 +48,10 @@ Step-by-step installation: `docs/INSTALL.md`. Upgrades and rollback: `docs/UPGRA
 | `NODE_EXTRA_CA_CERTS` | no | none | Node's own extra CA file (private CA for IMAP TLS on the Node path). Set it together with `SIDECAR_EXTRA_CA_FILE`; with Docker via a `docker-compose.override.yml` (INSTALL.md section 7). |
 
 The compose file forwards the variables it names (see `.env.example`); to set others, add them under `environment:` in a `docker-compose.override.yml`. The sidecar does not inherit the full environment, only the variables the bridge passes on explicitly.
+
+## Web UI and sessions
+
+The admin UI is a single-page app (Nuxt, built into the image) served by the same process as the API, at `/login`, `/dashboard`, `/audit`, `/setup`, `/mailboxes/*`, `/clients/*` and `/oauth/authorize`; `GET /` redirects to `/dashboard`. It talks to a JSON API under `/api`. The admin session is a sealed cookie (`imap2mcp.sid`: encrypted and signed with `SESSION_SECRET`, `HttpOnly`, `SameSite=Lax`, `Secure` when `BASE_URL` is https, 24 h), so there is no server-side session store and a restart does not sign anyone out. Every state-changing `/api` request must be JSON and carry the per-session `X-CSRF-Token` header; the UI does this for you. Logging out retires the session in memory (a copied cookie of a logged-out session stops working until the process restarts, after which it is accepted again until its 24 h expiry).
 
 ## Health endpoints
 
@@ -84,7 +89,7 @@ Backups and the `backups/` directory contain the access audit (message identifie
 - Remove a single permission: **Clients -> client -> Grants**. Applies to the next tool call, including already issued tokens.
 - Kill one token: **Dashboard -> Active tokens -> Revoke**.
 - Cut off a client completely: **Dashboard -> Disable** (also revokes its tokens).
-- Remove a mailbox: **Mailbox -> Delete**. Grants cascade; mail on the server is untouched.
+- Remove a mailbox: **Mailbox -> Delete** (a confirmation dialog asks you to type the mailbox label). Grants cascade; mail on the server is untouched.
 - Rotating the IMAP password at the provider: edit the mailbox and enter the new password (leave empty to keep the old one). Changing host, port or username clears the Drafts folder selection.
 
 Token lifetimes: access 1 hour, refresh 30 days, authorization code 10 minutes.
@@ -93,7 +98,7 @@ Token lifetimes: access 1 hour, refresh 30 days, authorization code 10 minutes.
 
 Stdout only: one JSON object per line (`ts`, `level`, `msg`, fields), level via `LOG_LEVEL`. Secrets (bearer tokens, passwords, authorization codes, the master key and `SESSION_SECRET` values) are redacted centrally; tests assert this. The first-run bootstrap token is printed as plain text on purpose, so treat the first-run log as sensitive until setup is complete. Every MCP request has a `requestId` (also the `X-Request-Id` response header, the tool error payload and the audit row).
 
-Every tool attempt (allowed, denied, failed, cached) is recorded in the audit table; browse and download it under **Audit log** in the admin UI or with `docker compose exec imap-bridge node dist/audit/cli.js --format jsonl|csv [--from --to ...]`. Retention: `AUDIT_RETENTION_DAYS`.
+Every tool attempt (allowed, denied, failed, cached) is recorded in the audit table; browse and download it under **Audit log** in the admin UI or with `docker compose exec imap-bridge node dist/audit/cli.js --format jsonl|csv [--from --to ...]` (a standalone bundle built into the image by `npm run build`; from a source checkout run `npm run build` first, then `npm run audit:export -- --format csv`). Retention: `AUDIT_RETENTION_DAYS`.
 
 ## Upgrades
 

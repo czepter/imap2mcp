@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { openDatabase } from "../../src/db/database.js";
+import { openDatabase } from "../../server/core/db/database.js";
 
 describe("drizzle migrations", () => {
   it("creates all tables on a fresh DB with FKs enforced", () => {

@@ -1,6 +1,6 @@
 # Installation (clean host, container)
 
-This is the complete path from an empty Linux host to a working, TLS-fronted bridge that an MCP client can use. Every command below was run against the image built from this repository. Anything not exercised is marked.
+This is the complete path from an empty Linux host to a working, TLS-fronted bridge that an MCP client can use. The admin UI is a single-page app (Nuxt) served by the same process as the API, at the same URLs as before. Commands marked "verified" or described as observed were run against an image of this repository; most of them were first run on the earlier Express-based image, and the ones re-run on the Nuxt image are listed under "Automated check of this procedure". Anything not exercised is marked.
 
 ## 1. Prerequisites
 
@@ -21,7 +21,7 @@ git clone <this repo> imap2mcp && cd imap2mcp
 
 Do **not** run `docker compose build` yet: Compose refuses to even parse `docker-compose.yml` until `.env` (step 3) defines `BASE_URL` and `SESSION_SECRET` (`required variable BASE_URL is missing a value`). The image is built in step 4 with `docker compose up -d --build`.
 
-The image runs as the non-root user `node` (uid 1000), keeps `dumb-init` as PID 1, contains the Go sidecar, and has a Docker `HEALTHCHECK` against `/healthz`.
+The image runs as the non-root user `node` (uid 1000), keeps `dumb-init` as PID 1, contains the built web UI and server (`.output/`), the Go sidecar and the audit export CLI, and has a Docker `HEALTHCHECK` against `/healthz`. The process listens on `0.0.0.0:$PORT` (default 3000).
 
 ## 3. Provision secrets and configuration
 
@@ -59,7 +59,7 @@ Other settings (`REGISTRATION_MODE`, `ALLOW_PRIVATE_HOSTS`, `LOG_LEVEL`, `AUDIT_
 ## 4. Build, start and check health
 
 ```bash
-docker compose up -d --build                          # first build takes a few minutes (compiles the Go sidecar and better-sqlite3)
+docker compose up -d --build                          # first build takes a few minutes (compiles the Go sidecar and builds the web UI)
 docker compose ps                                     # STATUS becomes "Up ... (healthy)" within ~30 s
 curl -s http://127.0.0.1:3000/healthz                 # {"status":"ok"}
 curl -s http://127.0.0.1:3000/readyz                  # {"status":"ok","checks":{"db":"ok","key":"ok","sidecar":"ok","migrations":"ok"}}
@@ -79,9 +79,10 @@ Do not expose port 3000 directly. Put a TLS-terminating proxy in front and point
 
 Requirements the examples already meet; keep them if you write your own:
 
-1. Forward `X-Forwarded-For` and `X-Forwarded-Proto` and **overwrite** any client-supplied values. The app trusts exactly one hop (`trust proxy = 1`) when `BASE_URL` is https; with more proxies in a chain the client IP seen by the rate limiters would be wrong.
+1. Forward `X-Forwarded-For` and `X-Forwarded-Proto` and **overwrite** any client-supplied values. The app trusts exactly one hop (the last `X-Forwarded-For` entry) when `BASE_URL` is https; with more proxies in a chain the client IP seen by the rate limiters would be wrong.
 2. Do not buffer responses and allow long reads: MCP over Streamable HTTP may answer with `text/event-stream`. The examples set `flush_interval -1` (Caddy) and `proxy_buffering off` plus a 1 h read timeout (nginx).
 3. Keep the host name equal to the host in `BASE_URL`.
+4. Do not override `Cache-Control`. The app serves the content-hashed web UI files under `/_nuxt/` with `public, max-age=31536000, immutable` (observed on the image) and marks the HTML shell and the JSON API `no-store`; compressing (gzip/zstd) at the proxy is fine and the examples do it.
 
 Reload the proxy with its usual command (`sudo systemctl reload caddy` or `sudo nginx -t && sudo systemctl reload nginx`; not exercised here), then check from outside:
 
@@ -123,7 +124,7 @@ docker compose logs imap-bridge | grep -A1 "bootstrap token"
 
 Open `https://mcp.example.com/setup`, paste the token and choose the admin password (at least 12 characters). After that `/setup` returns 404 permanently; there is no reset route (see RECOVERY.md for the offline procedure). To pick the token yourself, set `ADMIN_BOOTSTRAP_TOKEN` in `.env` before the first start and remove it afterwards. Treat the first-run log as sensitive until setup is done.
 
-Sign in at `/login`.
+Sign in at `/login`. `GET /` redirects to the dashboard (`/dashboard`), which sends you to `/login` (or to `/setup` before the first admin exists) when you are not signed in.
 
 ## 7. Add a mailbox
 
@@ -131,7 +132,7 @@ Sign in at `/login`.
 2. On the mailbox page press **Test connection**. A success shows the server's folders.
 3. Pick the **Drafts folder** and **Save Drafts folder**. `create_draft` only ever writes there; without it, draft grants are disabled.
 
-After saving, the mailbox page shows the connection status **unknown**. It stays that way until the bridge has actually connected (first successful tool call or connection test); it is not an error. In the same way, a freshly started bridge has no admin sessions: sessions are kept in memory and are lost on every restart or `up -d` that recreates the container, so you have to log in again (OAuth tokens are unaffected).
+After saving, the mailbox page shows the connection status **unknown**. It stays that way until the bridge has actually connected (first successful tool call or connection test); it is not an error. The admin session is a sealed (encrypted and signed) cookie, so a restart or a recreated container does not sign you out; it ends after 24 hours, on logout, or when `SESSION_SECRET` changes (OAuth tokens are unaffected by any of this).
 
 If the test says the host resolves to a private address, add the exact host name to `ALLOW_PRIVATE_HOSTS` in `.env` and apply it with `docker compose up -d`.
 
@@ -193,3 +194,5 @@ The seven tools and their arguments (the mailbox is always the `id` from `list_m
 ## Automated check of this procedure
 
 `npm run smoke` (`scripts/smoke.sh`) builds the image and runs it against a TLS fake IMAP server, covering health endpoints, bootstrap, OAuth plus an MCP tool call, restart persistence, the upgrade path with a pre-migration backup, a failing migration, and missing/wrong key behavior. It prints `SKIP: ...` and exits 0 if Docker is unavailable. It does not cover the reverse proxy or a public DNS/TLS setup.
+
+On the Nuxt-based image these checks were run and passed (10 of 10): public `no-store` health endpoints, non-root start and the image `HEALTHCHECK`, the web UI shell and its hashed assets with the security headers, health rate limiting, `/setup` plus mailbox plus OAuth plus an MCP tool call through the JSON API, graceful stop and restart persistence, wrong key (503 on `/readyz`, recovery by re-entering the password), missing/malformed key refusing to start, the upgrade path with a mode-0600 pre-migration backup and a failing migration leaving the database untouched. Also run by hand on that image: the audit export CLI (`node dist/audit/cli.js`, against an empty migrated database) and `require('better-sqlite3')` from the working directory (what the manual-backup and owner-reset commands in UPGRADING.md and RECOVERY.md use). The rest of this page (reverse proxy, TLS rehearsal, private CA override, real MCP clients) was not re-run for the Nuxt release.

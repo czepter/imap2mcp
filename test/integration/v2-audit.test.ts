@@ -228,8 +228,9 @@ describe.skipIf(!canRunV2)("v2 audit trail (criterion 4)", () => {
       expect(csv.code, csv.stderr).toBe(0);
       expectNoLeak(csv.stdout, [...needles, ...secrets], "CSV export");
 
-      const page = await (await s.admin.get("/audit")).text();
-      expectNoLeak(page, [...needles, ...secrets], "/audit page");
+      const page = await (await s.admin.get("/api/audit")).text();
+      expectNoLeak(page, [...needles, ...secrets], "/api/audit response");
+      for (const f of ["jsonl", "csv"]) expectNoLeak(await (await s.admin.get(`/api/audit/export.${f}`)).text(), [...needles, ...secrets], `/api/audit/export.${f} response`);
       expectNoLeak(s.srv.output(), secrets, "server log");
     });
   });
@@ -274,29 +275,31 @@ describe.skipIf(!canRunV2)("v2 audit trail (criterion 4)", () => {
       expect(r.stderr).toMatch(/format/i);
     });
 
-    it("admin UI: /audit lists events, filters by outcome, downloads JSONL and CSV; anonymous users get nothing", async () => {
-      const page = await s.admin.get("/audit");
+    it("admin API: /api/audit lists events, filters by outcome, downloads JSONL and CSV; anonymous users get nothing", async () => {
+      const page = await s.admin.get("/api/audit");
       expect(page.status).toBe(200);
-      const html = await page.text();
-      expect(html).toContain("<td>search_messages</td>");
-      expect(html).toContain("denied");
-      const filtered = await (await s.admin.get("/audit?outcome=unknown_outcome")).text();
-      expect(filtered).toContain("create_draft");
-      expect(filtered).not.toContain("<td>list_folders</td>");
-      expect(filtered).toContain("<td>create_draft</td>");
-      const j = await s.admin.get("/audit/export.jsonl?outcome=denied");
+      const body = (await page.json()) as any;
+      expect(body.events.some((e: any) => e.tool === "search_messages")).toBe(true);
+      expect(body.events.some((e: any) => e.outcome === "denied")).toBe(true);
+      expect(body.total).toBe(auditCount(s));
+      const filtered = (await (await s.admin.get("/api/audit?outcome=unknown_outcome")).json()) as any;
+      expect(filtered.events.length).toBeGreaterThan(0);
+      expect(filtered.events.every((e: any) => e.outcome === "unknown_outcome")).toBe(true);
+      expect(filtered.events.some((e: any) => e.tool === "create_draft")).toBe(true);
+      expect(filtered.events.some((e: any) => e.tool === "list_folders")).toBe(false);
+      const j = await s.admin.get("/api/audit/export.jsonl?outcome=denied");
       expect(j.status).toBe(200);
       expect(j.headers.get("content-disposition")).toMatch(/attachment/);
       const jl = (await j.text()).trim().split("\n").map((l) => JSON.parse(l));
       expect(jl.length).toBe(auditRows(s).filter((r) => r.outcome === "denied").length);
-      const c = await s.admin.get("/audit/export.csv");
+      const c = await s.admin.get("/api/audit/export.csv");
       expect(c.status).toBe(200);
       expect((await c.text()).trim().split("\n").length).toBe(auditCount(s) + 1);
       const anon = new Browser(s.base);
-      for (const p of ["/audit", "/audit/export.jsonl", "/audit/export.csv"]) {
+      for (const p of ["/api/audit", "/api/audit/export.jsonl", "/api/audit/export.csv"]) {
         const r = await anon.get(p);
-        expect([301, 302, 303, 401, 403], p).toContain(r.status);
-        expect(await r.text()).not.toContain("<td>search_messages</td>");
+        expect(r.status, p).toBe(401);
+        expect(await r.text()).not.toContain("search_messages");
       }
     });
   });

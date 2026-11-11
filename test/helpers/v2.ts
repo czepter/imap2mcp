@@ -93,14 +93,14 @@ export async function newAuditRows<T>(s: Stack, fn: () => Promise<T>): Promise<{
   return { result, rows: auditRows(s).filter((r) => !before.has(r.id)) };
 }
 
-// ------------------------------------------------------------------ UI actions
-/** Admin UI "Retry" on a mailbox. Path per the v2 UI contract owner (J): POST /mailboxes/:id/retry. */
+// ------------------------------------------------------------------ admin API actions
+/** Admin "Retry" on a mailbox: POST /api/mailboxes/:id/retry (204). */
 export async function uiRetry(s: Stack, mailboxId: string): Promise<Response> {
-  return s.admin.postWithCsrf(`/mailboxes/${mailboxId}`, `/mailboxes/${mailboxId}/retry`, {});
+  return s.admin.postWithCsrf(`/api/mailboxes/${mailboxId}/retry`);
 }
-/** Admin UI credential edit (same form the owner uses). */
+/** Admin credential edit (same call the SPA's mailbox form makes): PATCH /api/mailboxes/:id (200 + Mailbox). */
 export async function uiEditCredentials(s: Stack, mailboxId: string, user: string, pass: string): Promise<Response> {
-  return s.admin.postWithCsrf(`/mailboxes/${mailboxId}`, `/mailboxes/${mailboxId}`, { label: `Box ${user.split("@")[0]}`, host: "localhost", port: String(s.fake.port), username: user, password: pass });
+  return s.admin.patchWithCsrf(`/api/mailboxes/${mailboxId}`, { label: `Box ${user.split("@")[0]}`, host: "localhost", port: s.fake.port, username: user, password: pass });
 }
 
 // ------------------------------------------------------------------ assertions
@@ -161,10 +161,10 @@ export const isoMs = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const WRITE_RE = /^(APPEND|UID MOVE|MOVE|UID COPY|COPY|UID STORE|STORE|UID EXPUNGE|EXPUNGE)\b/i;
 export const writeCommands = (f: FakeImapServer): string[] => f.commands.filter((c) => WRITE_RE.test(c.line)).map((c) => c.line.split(" ").slice(0, 2).join(" "));
 
-/** Runs `npm run audit:export -- args` against the stack's data dir. */
+/** Runs the audit export CLI (server/core/audit/cli.ts, what `npm run audit:export` wraps) against the stack's data dir. */
 export function runAuditExport(s: Stack, args: string[], env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const p = spawn("npm", ["run", "--silent", "audit:export", "--", ...args], {
+    const p = spawn(process.execPath, [join(REPO, "node_modules/tsx/dist/cli.mjs"), join(REPO, "server/core/audit/cli.ts"), ...args], {
       cwd: REPO,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test", DATA_DIR: s.work.dataDir, ENCRYPTION_KEY_FILE: s.work.keyFile, SESSION_SECRET: s.work.sessionSecret, BASE_URL: s.base, ...env } as NodeJS.ProcessEnv,
     });

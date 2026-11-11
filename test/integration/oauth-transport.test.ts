@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { makeSelfSignedCert } from "../helpers/certs.js";
 import {
-  createStack, obtainToken, registerClient, consent, exchange, pkce, rawMcp, Mcp, sha256hex, hiddenFields, REDIRECT, msg, type Stack,
+  createStack, obtainToken, registerClient, consent, consentQuery, exchange, pkce, rawMcp, Mcp, sha256hex, REDIRECT, msg, type Stack,
 } from "../helpers/stack.js";
 
 const haveOpenssl = !!makeSelfSignedCert();
@@ -70,13 +70,9 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
       expect(authUrl!.searchParams.get("resource")).toBe(`${s.base}/mcp`);
 
       // The owner approves in the browser.
-      const page = await s.admin.get(authUrl!.pathname + authUrl!.search);
-      expect(page.status).toBe(200);
-      const form = hiddenFields(await page.text());
-      form[`g_${alice}_read`] = "1";
-      form.decision = "approve";
-      const done = await s.admin.post("/oauth/authorize", form);
-      const code = new URL(done.headers.get("location")!).searchParams.get("code")!;
+      expect(authUrl!.pathname).toBe("/oauth/authorize");
+      const done = await consentQuery(s.admin, authUrl!.searchParams, [[alice, "read"]]);
+      const code = new URL(done.location).searchParams.get("code")!;
       expect(code).toBeTruthy();
 
       await t1.finishAuth(code);
@@ -132,15 +128,17 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
       const clientId = await registerClient(s.base);
       const q = (extra: Record<string, string>) => new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: REDIRECT, ...extra });
       const base = pkce();
-      const noPkce = await s.admin.get(`/oauth/authorize?${q({})}`);
-      expect(noPkce.status).toBe(302);
-      expect(noPkce.headers.get("location")).toContain("error=invalid_request");
-      const plain = await s.admin.get(`/oauth/authorize?${q({ code_challenge: base.challenge, code_challenge_method: "plain" })}`);
-      expect(plain.headers.get("location")).toContain("error=invalid_request");
-      const res = await s.admin.get(`/oauth/authorize?${q({ code_challenge: base.challenge, code_challenge_method: "S256", resource: "https://evil.example/mcp" })}`);
-      expect(res.headers.get("location")).toContain("error=invalid_target");
-      const badRedirect = await s.admin.get(`/oauth/authorize?${new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: "http://localhost:1/not-registered", code_challenge: base.challenge, code_challenge_method: "S256" })}`);
+      // protocol errors the client must hear about come back as { redirectTo } (they used to be 302s)
+      const redirectOf = async (res: Response) => ((await res.json()) as { redirectTo?: string }).redirectTo ?? "";
+      const noPkce = await s.admin.get(`/api/oauth/authorize?${q({})}`);
+      expect(await redirectOf(noPkce)).toContain("error=invalid_request");
+      const plain = await s.admin.get(`/api/oauth/authorize?${q({ code_challenge: base.challenge, code_challenge_method: "plain" })}`);
+      expect(await redirectOf(plain)).toContain("error=invalid_request");
+      const res = await s.admin.get(`/api/oauth/authorize?${q({ code_challenge: base.challenge, code_challenge_method: "S256", resource: "https://evil.example/mcp" })}`);
+      expect(await redirectOf(res)).toContain("error=invalid_target");
+      const badRedirect = await s.admin.get(`/api/oauth/authorize?${new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: "http://localhost:1/not-registered", code_challenge: base.challenge, code_challenge_method: "S256" })}`);
       expect(badRedirect.status).toBe(400); // never redirects to an unregistered URI
+      expect(await badRedirect.text()).not.toContain("redirectTo");
     });
 
     it("refresh rotates the refresh token; reusing the old one fails", async () => {
@@ -215,9 +213,9 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
         const r = await fetch(`${s2.base}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [REDIRECT] }) });
         expect(r.status).toBe(403);
         // admin can still create a client through the UI
-        const created = await s2.admin.postWithCsrf("/dashboard", "/clients", { client_name: "ui-client", redirect_uris: REDIRECT });
-        expect(created.status).toBe(302);
-        expect(created.headers.get("location")).toMatch(/^\/clients\//);
+        const created = await s2.admin.postWithCsrf("/api/clients", { name: "ui-client", redirectUris: [REDIRECT] });
+        expect([200, 201]).toContain(created.status);
+        expect(((await created.json()) as { clientId: string }).clientId).toMatch(/\S+/);
       } finally { await s2.teardown(); }
     });
   });
@@ -259,8 +257,8 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
       const live = await new Mcp(s.base, tokens.access_token).connect();
       expect((await live.call("list_mailboxes")).isError).toBe(false);
       const id = (s.srv.db().prepare("SELECT id FROM oauth_tokens WHERE token_hash = ?").get(sha256hex(tokens.access_token)) as any).id;
-      const r = await s.admin.postWithCsrf(`/tokens/${id}/revoke`, `/tokens/${id}/revoke`, {}) /* GET confirmation page carries the CSRF token */;
-      expect(r.status).toBe(302);
+      const r = await s.admin.postWithCsrf(`/api/tokens/${id}/revoke`);
+      expect(r.status).toBe(204);
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(401);
       await expect(live.call("list_mailboxes")).rejects.toThrow();
       await live.close();
@@ -273,8 +271,8 @@ describe.skipIf(!haveOpenssl)("OAuth + Streamable HTTP", () => {
     });
     it("rejects tokens of a disabled client", async () => {
       const { clientId, tokens } = await obtainToken(s, [[alice, "read"]]);
-      const r = await s.admin.postWithCsrf(`/clients/${clientId}/disable`, `/clients/${clientId}/disable`, {}) /* GET confirmation page carries the CSRF token */;
-      expect(r.status).toBe(302);
+      const r = await s.admin.postWithCsrf(`/api/clients/${clientId}/disable`);
+      expect(r.status).toBe(204);
       expect((await rawMcp(s.base, `Bearer ${tokens.access_token}`)).status).toBe(401);
     });
     it("rejects HTTP Basic auth (admin password, client id, anything)", async () => {
