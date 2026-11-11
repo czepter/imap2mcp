@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@lucide/vue": "^1.71.0",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@vueuse/core": "^15.0.0",
     "better-sqlite3": "^13.0.3",
     "class-variance-authority": "^0.7.1",
