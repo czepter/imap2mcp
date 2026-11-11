@@ -45,7 +45,7 @@
   "devDependencies": {
     "@nuxt/test-utils": "^4.4.0",
     "@tailwindcss/vite": "^4.3.5",
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.6",
     "@types/nodemailer": "^6.4.17",
     "@types/uuid": "^10.0.0",
