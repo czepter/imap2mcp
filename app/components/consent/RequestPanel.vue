@@ -44,7 +44,7 @@ const hasMailboxes = computed(() => props.request.mailboxes.length > 0);
       <p class="text-muted-foreground mt-[5px] text-[13px]">
         Only the capabilities this client requested are listed. <b class="text-foreground">read</b> searches and reads messages.
         <b class="text-foreground">draft</b> writes drafts, never sends.<template v-if="columns.includes('organize')">{{ " " }}<b class="text-foreground">organize</b> moves messages and sets flags.</template>
-        Change this later under <NuxtLink to="/dashboard#clients" class="underline underline-offset-2">Clients</NuxtLink>.
+        Change this later under <NuxtLink to="/clients" class="underline underline-offset-2">Clients</NuxtLink>.
       </p>
     </template>
 

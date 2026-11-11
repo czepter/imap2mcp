@@ -14,7 +14,7 @@ const status = computed(() => data.value?.status ?? null);
 
 useHead({ title: () => mailbox.value?.label ?? "Mailbox" });
 useBreadcrumbs(() => [
-  { label: "Mailboxes", to: "/dashboard#mailboxes" },
+  { label: "Mailboxes", to: "/mailboxes" },
   { label: mailbox.value?.label ?? "Mailbox" },
 ]);
 

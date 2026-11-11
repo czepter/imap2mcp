@@ -3,7 +3,7 @@ import { toast } from "vue-sonner";
 import type { Mailbox, MailboxInput } from "~~/shared/types/api";
 
 useHead({ title: "Add mailbox" });
-useBreadcrumbs([{ label: "Mailboxes", to: "/dashboard#mailboxes" }, { label: "New" }]);
+useBreadcrumbs([{ label: "Mailboxes", to: "/mailboxes" }, { label: "New" }]);
 
 const api = useApi();
 const pending = ref(false);
