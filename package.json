@@ -56,7 +56,7 @@
     "shadcn-nuxt": "^2.9.0",
     "tailwindcss": "^4.3.5",
     "tsx": "^4.23.15",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vitest": "^5.1.0",
     "vue-tsc": "^3.3.14"
   }
