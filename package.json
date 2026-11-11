@@ -47,7 +47,7 @@
     "@tailwindcss/vite": "^4.3.5",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.6",
-    "@types/nodemailer": "^6.4.17",
+    "@types/nodemailer": "^8.0.2",
     "@types/uuid": "^10.0.0",
     "@vue/test-utils": "^2.5.1",
     "drizzle-kit": "^0.31.11",
