@@ -18,4 +18,11 @@ if ! command -v openssl >/dev/null 2>&1; then
   exit 0
 fi
 
+if ! command -v npx >/dev/null 2>&1; then
+  echo "SKIP: node/npx is required to run the smoke harness (npm ci first); the container itself needs only docker." >&2
+  exit 0
+fi
+
+# The harness (test/smoke/smoke.smoke.ts) builds the image from the Dockerfile unless SMOKE_IMAGE is set, starts
+# containers and waits for GET /healthz (or the container exiting, for the fail-closed cases).
 exec npx vitest run --config test/smoke/vitest.config.ts "$@"

@@ -1,5 +1,7 @@
 # v2 Design Contract — Production hardening
 
+> **Note (Nuxt migration):** this is the v2 design as it was written. Paths such as `src/...`, and mentions of Express, server-rendered pages, `src/web/**` or middleware, describe the code at that time. The domain code now lives in `server/core/`, the admin UI is a Nuxt single-page app over a JSON API (`/api`, header-token CSRF, sealed-cookie sessions) and the server is Nitro; see `docs/NUXT_MIGRATION.md` and `README.md`. The protocol, policy, audit and storage decisions below are unchanged; decisions about the admin UI and its web security are superseded by the migration document.
+
 Binding for v2. Inherits DESIGN_V0/V1 and all earlier gates (284 tests must keep passing). Source: `docs/VERSION_PLAN.md` Version 2,
 `docs/PRD.md` FR-17..19, NFR-R1..R3, §13 #12. Single-owner self-hosting; no HA, no clustering, no exactly-once claims.
 

@@ -1,6 +1,17 @@
 version: 2
 updates:
   - { package-ecosystem: github-actions, directory: "/", schedule: { interval: weekly } }
-  - { package-ecosystem: npm, directory: "/", schedule: { interval: weekly }, open-pull-requests-limit: 5 }
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    # Framework packages release in lockstep; one PR per family instead of one per package.
+    groups:
+      nuxt:
+        patterns: ["nuxt", "@nuxt/*", "shadcn-nuxt", "nitropack", "h3"]
+      vue:
+        patterns: ["vue", "vue-router", "vue-tsc", "@vue/*", "@vueuse/*", "reka-ui", "vue-sonner"]
+      tailwind:
+        patterns: ["tailwindcss", "@tailwindcss/*", "tw-animate-css", "tailwind-merge", "class-variance-authority", "clsx"]
   - { package-ecosystem: gomod, directory: "/sidecar", schedule: { interval: weekly } }
   - { package-ecosystem: docker, directory: "/", schedule: { interval: weekly } }

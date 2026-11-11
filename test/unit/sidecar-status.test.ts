@@ -1,9 +1,9 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SidecarService, type OpenParams } from "../../src/sidecar/service.js";
-import { SidecarRpcError } from "../../src/sidecar/errors.js";
-import { StatusPoller, toMailboxStatus, type SidecarStatus, type StatusSource } from "../../src/sidecar/status.js";
-import { SIDECAR_ENV_KNOBS, createSidecarFromConfig } from "../../src/sidecar/index.js";
+import { SidecarService, type OpenParams } from "../../server/core/sidecar/service.js";
+import { SidecarRpcError } from "../../server/core/sidecar/errors.js";
+import { StatusPoller, toMailboxStatus, type SidecarStatus, type StatusSource } from "../../server/core/sidecar/status.js";
+import { SIDECAR_ENV_KNOBS, createSidecarFromConfig } from "../../server/core/sidecar/index.js";
 
 let db: Database.Database;
 const T0 = Date.parse("2026-11-08T12:00:00.000Z");

@@ -20,10 +20,10 @@ A single-owner bridge that lets AI agents use your IMAP mailboxes through the [M
 
   A folder selector is an exact IMAP path, `*` (everything) or `prefix/*` (the prefix and its sub-folders); case-sensitive, nothing else is a wildcard. **Any matching deny wins; otherwise any matching allow; otherwise deny.** The token's scopes stay a ceiling. Rules are read on every call, so removing a rule or revoking a client applies to the next call (existing tokens included), and writes are re-checked right before they are sent. Search never touches, counts or reveals folders where `search` is denied, and error messages do not reveal whether a denied folder exists. The v0 "presets" (read / draft / organize per mailbox) remain as shortcuts that expand to rules; upgrading from v0 migrates grants without widening anyone's access.
 - **Go sidecar for reads** (v1). LIST/STATUS/FETCH/SEARCH run in `sidecar/` (Go, go-imap v2), reached over a private Unix socket (`DATA_DIR/sidecar.sock`, mode 0600) with a per-process secret passed on the child's stdin. Node stays the policy authority and authorizes before and filters after every sidecar call. The sidecar caches UIDs, flags and envelopes in memory (never bodies), keyed by mailbox, folder, UIDVALIDITY and UID; UIDNEXT drives fetching new mail, and a periodic UID/flag reconciliation (`SYNC_RECONCILE_SECS`, default 30) catches expunges and flag changes made by other clients. Writes (APPEND, MOVE, STORE) stay in Node. If the sidecar is down, tools return `UPSTREAM_ERROR` while Node restarts it; the cache is rebuilt from IMAP.
-- **Audit log** (v2). Every tool attempt (allowed, denied, failed, unknown outcome) writes one row with client, mailbox, folder, UIDVALIDITY, UIDs, tool, outcome, error code and request id, never message content or credentials. Browse and export it (JSONL/CSV) under **Audit** in the admin UI or with `npm run audit:export`; retention defaults to 90 days. By default it fails closed: if the audit row cannot be written, the tool does not run (`AUDIT_FAIL_MODE=open` to accept unaudited access).
+- **Audit log** (v2). Every tool attempt (allowed, denied, failed, unknown outcome) writes one row with client, mailbox, folder, UIDVALIDITY, UIDs, tool, outcome, error code and request id, never message content or credentials. Browse and export it (JSONL/CSV) under **Audit** in the admin UI or with `npm run audit:export -- --format csv` (needs `npm run build` first; in the container: `docker compose exec imap-bridge node dist/audit/cli.js --format csv`); retention defaults to 90 days. By default it fails closed: if the audit row cannot be written, the tool does not run (`AUDIT_FAIL_MODE=open` to accept unaudited access).
 - **Structured errors and request ids** (v2). Every error is `{code, message, requestId, retryable, operatorAction?}`; the same `requestId` is in the `X-Request-Id` header, the log and the audit row. Reads are retried at most twice inside a 30 s budget; writes are never replayed. After a lost connection `create_draft`, `move_message` and `set_flags` are reconciled from server state or answered `UNKNOWN_OUTCOME`. See `docs/ERRORS.md`.
 - **Authentication-failure latch** (v2). When a mailbox's credentials are rejected the bridge stops trying (no lockout-causing retry loops) and tools answer `AUTH_FAILED` with an operator action. Edit the password or press **Retry** in the admin UI to clear it; other mailboxes are unaffected.
-- **Health endpoints** (v2). Unauthenticated `GET /healthz` (liveness) and `GET /readyz` (database, key, sidecar, migrations), used by the Docker `HEALTHCHECK`; per-mailbox state is shown in the admin UI.
+- **Admin UI**. A single-page app (Nuxt 4, Vue, shadcn-vue) served by the same Nitro process as the API, at `/login`, `/dashboard`, `/audit`, `/setup`, `/mailboxes/*`, `/clients/*` and the OAuth consent page `/oauth/authorize`; `GET /` redirects to the dashboard. It uses a JSON API under `/api`: a sealed session cookie (no server-side session store, so a restart does not sign you out) and a CSRF header token on every state-changing request. The machine-facing protocol (`/mcp`, `/oauth/*`, `/.well-known/*`, `/healthz`, `/readyz`) is unchanged. See `docs/NUXT_MIGRATION.md`. Unauthenticated `GET /healthz` (liveness) and `GET /readyz` (database, key, sidecar, migrations), used by the Docker `HEALTHCHECK`; per-mailbox state is shown in the admin UI.
 - **Mailbox secrets encrypted at rest** (AES-256-GCM, per-record IV, ciphertext bound to its table/row/column). The master key lives in a file outside the database. A missing or malformed key stops the server from starting; a wrong key makes every mailbox operation fail.
 - **Safe IMAP behavior**: TLS only with certificate validation, no plaintext fallback; reads use `BODY.PEEK` so unread state is not changed; moves use `UID MOVE` or `UID COPY` plus flag and `UID EXPUNGE` of that UID only (never a plain `EXPUNGE`); `\Deleted` cannot be set through the tools.
 - **SSRF policy**: a mailbox host must resolve to public addresses unless it is listed in `ALLOW_PRIVATE_HOSTS`.
@@ -58,24 +58,26 @@ docker compose logs imap-bridge | grep -A1 "bootstrap token"
 
 Then:
 
-1. Open `${BASE_URL}/setup`, paste the bootstrap token and choose the admin password (min. 12 characters). After this, `/setup` returns 404 permanently. You can fix the token in advance with `ADMIN_BOOTSTRAP_TOKEN`.
+1. Open `${BASE_URL}/setup` (or just `${BASE_URL}/`, which sends you there until an admin exists), paste the bootstrap token and choose the admin password (min. 12 characters). After this, `/setup` returns 404 permanently. You can fix the token in advance with `ADMIN_BOOTSTRAP_TOKEN`.
 2. Add a mailbox (host, TLS port, username, password), run **Test connection**, and pick the **Drafts folder** from the server's folder list.
 3. Point your MCP client at `${BASE_URL}/mcp`. It discovers OAuth, registers, and sends you to the consent screen, where you choose which mailbox access to allow. Afterwards refine the rules per folder and operation under **Clients**, revoke a client or its tokens, all with effect on the next call.
 
-The Docker image builds the Go sidecar in a separate stage and includes it at `sidecar/bin/sidecar`.
+The Docker image builds the Go sidecar and the web UI in separate stages. It contains the Nitro server (`.output/`, started with `node .output/server/index.mjs`), the sidecar at `sidecar/bin/sidecar`, the migrations (`drizzle/`) and the audit export CLI (`dist/audit/cli.js`).
 
-Run it behind an HTTPS reverse proxy (the compose file binds `127.0.0.1:3000`). With an `https://` `BASE_URL` the session cookie is `Secure` and one proxy hop is trusted. See `docs/OPERATIONS.md` for backup, key handling and upgrades.
+Run it behind an HTTPS reverse proxy (the compose file binds `127.0.0.1:3000`). With an `https://` `BASE_URL` the session cookie is `Secure` and one proxy hop is trusted. Proxy examples: `deploy/Caddyfile.example`, `deploy/nginx.conf.example`. See `docs/OPERATIONS.md` for backup, key handling and upgrades.
 
 ### Without Docker
 
 ```bash
 npm ci
 npm run build:sidecar        # needs Docker (golang:1.23-alpine) or a local Go toolchain; writes sidecar/bin/sidecar
-npm run build
+npm run build                # nuxt build -> .output/, plus the audit export CLI -> dist/audit/cli.js
 export BASE_URL=http://localhost:3000 SESSION_SECRET=$(openssl rand -hex 32) \
        ENCRYPTION_KEY_FILE=$PWD/secrets/imap2mcp_key DATA_DIR=$PWD/data
-npm start
+npm start                    # node .output/server/index.mjs; listens on 0.0.0.0:$PORT (default 3000)
 ```
+
+Development: `npm run dev` starts `nuxt dev` (hot reload for the UI and the server; same environment variables as above).
 
 Node 26 (LTS) or newer. `ENCRYPTION_KEY` (64 hex characters) is accepted as an alternative to `ENCRYPTION_KEY_FILE`; the file is preferred because environment variables leak into process listings and crash dumps.
 
@@ -85,11 +87,11 @@ Node 26 (LTS) or newer. `ENCRYPTION_KEY` (64 hex characters) is accepted as an a
 |---|---|---|
 | `BASE_URL` | yes for production | Public URL. MCP resource/audience is `${BASE_URL}/mcp`. `https` turns on `Secure` cookies and HSTS. |
 | `ENCRYPTION_KEY_FILE` or `ENCRYPTION_KEY` | yes | 32-byte master key (hex or base64 in the file; 64 hex characters in the variable). No default. |
-| `SESSION_SECRET` or `SESSION_SECRET_FILE` | yes | At least 32 characters. No default. The `_FILE` variant reads (and trims) the secret from a file, e.g. a Docker secret. |
+| `SESSION_SECRET` or `SESSION_SECRET_FILE` | yes | Seals the admin session cookie. At least 32 characters. No default; changing it signs every admin out. The `_FILE` variant reads (and trims) the secret from a file, e.g. a Docker secret. |
 | `AUDIT_FAIL_MODE` | no | `closed` (default) or `open`. See Audit log. |
 | `AUDIT_RETENTION_DAYS` | no | Audit retention, default 90; 0 keeps forever. |
 | `DATA_DIR` | no | Directory of `bridge.db` (SQLite, WAL). Default `./data`. |
-| `PORT` | no | Default 3000. |
+| `PORT` | no | Listen port, default 3000. `HOST` sets the listen address (the image uses `0.0.0.0`). |
 | `REGISTRATION_MODE` | no | `dynamic` (default, RFC 7591; registration grants nothing) or `admin` (clients are created in the UI only). |
 | `ALLOW_PRIVATE_HOSTS` | no | Comma list of mailbox host names that may resolve to private/loopback addresses. Matched by exact host name. |
 | `ADMIN_BOOTSTRAP_TOKEN` | no | Fixed one-time bootstrap token instead of a random one. |
@@ -110,13 +112,14 @@ npm run smoke             # build the Docker image and run a deployment smoke te
 npm run bench             # v1 performance gate: 10,000 messages, 20 ms RTT, sidecar in Docker --cpus=2 --memory=2g
 ```
 
-The integration suite needs `openssl` (to create a self-signed certificate for the fixture, injected through `NODE_EXTRA_CA_CERTS` so certificate validation stays on). If it is missing, those tests are skipped and the skip is printed; they are never reported as passing. The `v1-*` suites additionally need the built sidecar (`npm run build:sidecar`) and are skipped, with a printed reason, without it. Docker is needed only to build the sidecar without a local Go toolchain and for `npm run bench`. The fixture is a purpose-built fake (`test/helpers/fakeImap.ts`), not a production IMAP server: results show behavior against that fixture, not a provider compatibility matrix.
+The integration suite starts the real server (`node .output/server/index.mjs`), running `nuxt build` first when `.output/` is missing or older than the sources (`IMAP2MCP_BUILD=never` forbids that, `always` forces it). It needs `openssl` (to create a self-signed certificate for the fixture, injected through `NODE_EXTRA_CA_CERTS` so certificate validation stays on). If it is missing, those tests are skipped and the skip is printed; they are never reported as passing. The `v1-*` suites additionally need the built sidecar (`npm run build:sidecar`) and are skipped, with a printed reason, without it. Docker is needed only to build the sidecar without a local Go toolchain and for `npm run bench`. The fixture is a purpose-built fake (`test/helpers/fakeImap.ts`), not a production IMAP server: results show behavior against that fixture, not a provider compatibility matrix.
 
 ## Documentation
 
 - `docs/DESIGN_V0.md`: binding v0 design contract
 - `docs/DESIGN_V1.md`: binding v1 design contract (policy rules, sidecar RPC, performance gate)
 - `docs/DESIGN_V2.md`: binding v2 design contract (audit, failure handling, mutation safety, recovery)
+- `docs/NUXT_MIGRATION.md`: architecture and contract of the Nuxt 4 / Nitro admin UI and JSON API
 - `docs/INSTALL.md`: installation walkthrough
 - `docs/UPGRADING.md`: upgrading between versions, pre-migration backups
 - `docs/TROUBLESHOOTING.md`: symptoms, causes and fixes

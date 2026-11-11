@@ -46,5 +46,5 @@ An explicit server refusal (`NO`/`BAD`, e.g. `NO [OVERQUOTA]`) is definitive: th
 ## Internals for operators
 
 - Tool-level audit rows record `outcome` `ok`, `denied`, `failed` or `unknown_outcome`, plus `error_code` (one of the codes above), `cached` (data served from the sidecar's header cache) and `reconciled`.
-- `markMailboxAuthFailed(mailboxId)` / `clearMailboxAuthFailure(mailboxId)` (`src/imap/client.ts`) set and clear the latch and keep `mailboxes.status` in sync.
+- `markMailboxAuthFailed(mailboxId)` / `clearMailboxAuthFailure(mailboxId)` (`server/core/imap/client.ts`) set and clear the latch and keep `mailboxes.status` in sync.
 - Test-only knobs: `RECONNECT_INITIAL_MS`, `RECONNECT_MAX_MS` (backoff schedule), `TOOL_BUDGET_MS` (per-call budget).

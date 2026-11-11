@@ -58,6 +58,11 @@ jobs:
           path: sidecar/bin
       - run: chmod +x sidecar/bin/sidecar
       - run: npm ci
+      # npm ci already runs this through the postinstall hook; kept explicit so a failure here is easy to spot.
+      - name: generate Nuxt types
+        run: npx nuxt prepare
+      - run: npm run typecheck
+      # nuxt build (SPA + Nitro server into .output/) plus the standalone audit export CLI (dist/audit/cli.js).
       - run: npm run build
       - name: migrations are in sync with the schema
         run: |
@@ -67,6 +72,8 @@ jobs:
       # The v1 sidecar tests skip (not fail) when the binary is missing, so assert it is present.
       - name: sidecar binary present
         run: test -x sidecar/bin/sidecar
+      - name: build outputs present
+        run: test -f dist/audit/cli.js && test -d .output/public && test -f .output/server/index.mjs
       - run: npm test
         env:
           SIDECAR_BIN: ${{ github.workspace }}/sidecar/bin/sidecar

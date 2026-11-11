@@ -1,6 +1,6 @@
 # Recovery procedures
 
-All commands assume the Compose layout from `docs/INSTALL.md` (`imap2mcp/` with `data/`, `secrets/`, `.env`). Run `docker compose stop` before touching files in `data/`. Steps marked "verified" are exercised by `npm run smoke` or were run by hand against the built image; others are marked.
+All commands assume the Compose layout from `docs/INSTALL.md` (`imap2mcp/` with `data/`, `secrets/`, `.env`). Run `docker compose stop` before touching files in `data/`. Steps marked "verified" are exercised by `npm run smoke` or were run by hand against the built image; others are marked. Most "verified" marks were earned on the earlier Express-based image; the startup, key and database code is unchanged in the Nuxt release, and the smoke test and the commands re-run on it are listed in `docs/INSTALL.md` ("Automated check of this procedure").
 
 ## Lost or wrong master key
 

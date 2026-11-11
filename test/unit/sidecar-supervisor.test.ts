@@ -2,8 +2,8 @@ import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SidecarService, type OpenParams } from "../../src/sidecar/service.js";
-import { SidecarRpcError, SidecarUnavailableError } from "../../src/sidecar/errors.js";
+import { SidecarService, type OpenParams } from "../../server/core/sidecar/service.js";
+import { SidecarRpcError, SidecarUnavailableError } from "../../server/core/sidecar/errors.js";
 
 const FAKE = resolve(import.meta.dirname, "fake-sidecar.mjs");
 let dir: string;

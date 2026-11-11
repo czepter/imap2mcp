@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Browser, location } from "./http.js";
+import { Browser, json } from "./http.js";
+import type { AuthorizeParams, AuthorizeRequest, Mailbox, MailboxTestResult } from "../../shared/types/api.js";
 import { FakeImapServer } from "./fakeImap.js";
 import { makeSelfSignedCert, type TestCert } from "./certs.js";
 import { bootstrapTokenFrom, makeWorkdir, startServer, type RunningServer, type Workdir } from "./server.js";
@@ -31,13 +32,6 @@ export function pkce(): Pkce {
 export interface Tokens { access_token: string; refresh_token: string; expires_in: number; scope: string; token_type: string }
 
 export const REDIRECT = "http://localhost:8765/callback";
-
-export function hiddenFields(html: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  const un = (s: string) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-  for (const m of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) out[m[1]] = un(m[2]);
-  return out;
-}
 
 export interface Stack {
   cert: TestCert;
@@ -98,24 +92,36 @@ export async function createStack(o: { accounts?: string[]; move?: boolean; skip
 }
 
 export async function setupAdmin(s: Stack): Promise<void> {
-  const r = await s.admin.postWithCsrf("/setup", "/setup", { token: s.bootstrap, password: s.adminPassword, password2: s.adminPassword });
-  if (r.status !== 302) throw new Error(`setup failed: ${r.status} ${await r.text()}`);
+  const r = await s.admin.postWithCsrf("/api/setup", { token: s.bootstrap, password: s.adminPassword, password2: s.adminPassword });
+  if (r.status !== 204) throw new Error(`setup failed: ${r.status} ${await r.text()}`);
 }
 
+/** POST /api/login. 204 on success; the caller asserts the status (401 wrong password, 429 rate limited, 403 CSRF). */
 export async function adminLogin(b: Browser, password: string): Promise<Response> {
-  return b.postWithCsrf("/login", "/login", { password });
+  return b.postWithCsrf("/api/login", { password });
 }
 
-/** Adds a mailbox through the real UI, runs the connection test, and selects the Drafts folder. */
-export async function addMailbox(s: Stack, m: { label: string; host: string; port: number; user: string; pass: string }): Promise<string> {
-  const r = await s.admin.postWithCsrf("/mailboxes/new", "/mailboxes", { label: m.label, host: m.host, port: String(m.port), username: m.user, password: m.pass });
-  if (r.status !== 302) throw new Error(`add mailbox failed: ${r.status} ${await r.text()}`);
-  const id = /\/mailboxes\/([^?/]+)/.exec(location(r))![1];
-  const t = await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/test`, {});
-  const html = await t.text();
-  if (!/Connected\./.test(html)) throw new Error(`mailbox test failed: ${html.replace(/<[^>]+>/g, " ").slice(0, 400)}`);
-  const d = await s.admin.postWithCsrf(`/mailboxes/${id}`, `/mailboxes/${id}/drafts`, { drafts_folder: "Drafts" });
-  if (d.status !== 302) throw new Error(`set drafts failed: ${d.status}`);
+/** Creates a mailbox through the admin API WITHOUT testing it or choosing a Drafts folder. Returns its id. */
+export async function addMailboxRaw(s: Pick<Stack, "admin">, m: { label: string; host: string; port: number; user: string; pass: string }): Promise<string> {
+  const r = await s.admin.postWithCsrf("/api/mailboxes", { label: m.label, host: m.host, port: m.port, username: m.user, password: m.pass });
+  if (r.status !== 201) throw new Error(`add mailbox failed: ${r.status} ${await r.text()}`);
+  return (await json<Mailbox>(r)).id;
+}
+
+/** POST /api/mailboxes/:id/test -> parsed result. */
+export async function testMailbox(s: Pick<Stack, "admin">, id: string): Promise<MailboxTestResult> {
+  const r = await s.admin.postWithCsrf(`/api/mailboxes/${id}/test`);
+  if (r.status !== 200) throw new Error(`mailbox test request failed: ${r.status} ${await r.text()}`);
+  return json<MailboxTestResult>(r);
+}
+
+/** Adds a mailbox through the admin API, runs the connection test, and selects the Drafts folder. */
+export async function addMailbox(s: Pick<Stack, "admin">, m: { label: string; host: string; port: number; user: string; pass: string }): Promise<string> {
+  const id = await addMailboxRaw(s, m);
+  const t = await testMailbox(s, id);
+  if (!t.ok) throw new Error(`mailbox test failed: ${t.message}`);
+  const d = await s.admin.putWithCsrf(`/api/mailboxes/${id}/drafts`, { folder: "Drafts" });
+  if (d.status !== 204) throw new Error(`set drafts failed: ${d.status} ${await d.text()}`);
   return id;
 }
 
@@ -140,22 +146,40 @@ export interface AuthorizeOpts {
   decision?: "approve" | "deny";
 }
 
-/** Drives the consent screen as the logged-in owner; returns the redirect Location (code or error). */
-export async function consent(admin: Browser, base: string, o: AuthorizeOpts): Promise<{ location: string; pkce: Pkce }> {
-  const p = o.pkce ?? pkce();
+/** Query string of an authorization request as the client would send it. */
+export function authorizeQuery(o: Pick<AuthorizeOpts, "clientId" | "scope" | "resource" | "redirectUri"> & { pkce: Pkce }): URLSearchParams {
   const q = new URLSearchParams({
     response_type: "code", client_id: o.clientId, redirect_uri: o.redirectUri ?? REDIRECT, state: "st-" + randomBytes(4).toString("hex"),
-    code_challenge: p.challenge, code_challenge_method: "S256", scope: o.scope ?? "mail:read mail:draft mail:organize",
+    code_challenge: o.pkce.challenge, code_challenge_method: "S256", scope: o.scope ?? "mail:read mail:draft mail:organize",
   });
   if (o.resource) q.set("resource", o.resource);
-  const page = await admin.get(`/oauth/authorize?${q}`);
-  if (page.status !== 200) return { location: page.headers.get("location") ?? `status:${page.status}`, pkce: p };
-  const html = await page.text();
-  const form: Record<string, string> = hiddenFields(html);
-  for (const [mid, cap] of o.grants) form[`g_${mid}_${cap}`] = "1";
-  form.decision = o.decision ?? "approve";
-  const r = await admin.post("/oauth/authorize", form);
-  return { location: r.headers.get("location") ?? `status:${r.status}`, pkce: p };
+  return q;
+}
+
+/**
+ * Drives the consent screen's API as the logged-in owner: GET /api/oauth/authorize (validate + describe), then
+ * POST /api/oauth/authorize with the echoed params, the ticks and the decision. Returns the `redirectTo` (code or
+ * error) as `location`, or `status:<n>` when the API answered with an HTTP error instead of a redirect target.
+ */
+export async function consentQuery(admin: Browser, query: URLSearchParams | string, grants: Array<[string, Cap]>, decision: "approve" | "deny" = "approve"): Promise<{ location: string }> {
+  const page = await admin.get(`/api/oauth/authorize?${query}`);
+  const text = await page.text();
+  let body: Partial<AuthorizeRequest> & { redirectTo?: string } = {};
+  try { body = JSON.parse(text); } catch { /* not JSON */ }
+  if (typeof body.redirectTo === "string") return { location: body.redirectTo }; // protocol error reported to the client
+  if (page.status !== 200) return { location: `status:${page.status}` };
+  const params = body.params as AuthorizeParams;
+  const r = await admin.postWithCsrf("/api/oauth/authorize", { params, decision, grants: grants.map(([mailboxId, capability]) => ({ mailboxId, capability })) });
+  let out: { redirectTo?: string } = {};
+  try { out = JSON.parse(await r.text()); } catch { /* not JSON */ }
+  return { location: typeof out.redirectTo === "string" ? out.redirectTo : `status:${r.status}` };
+}
+
+export async function consent(admin: Browser, _base: string, o: AuthorizeOpts): Promise<{ location: string; pkce: Pkce }> {
+  const p = o.pkce ?? pkce();
+  const q = authorizeQuery({ ...o, pkce: p });
+  const { location } = await consentQuery(admin, q, o.grants, o.decision ?? "approve");
+  return { location, pkce: p };
 }
 
 export async function exchange(base: string, clientId: string, code: string, verifier: string, extra: Record<string, string> = {}): Promise<Response> {
@@ -177,11 +201,10 @@ export async function obtainToken(s: Stack, grants: Array<[string, Cap]>, o: { s
   return { clientId, tokens: (await r.json()) as Tokens };
 }
 
-export async function setGrants(s: Stack, clientId: string, grants: Array<[string, Cap]>): Promise<void> {
-  const form: Record<string, string> = {};
-  for (const [m, c] of grants) form[`g_${m}_${c}`] = "1";
-  const r = await s.admin.postWithCsrf(`/clients/${clientId}`, `/clients/${clientId}/grants`, form);
-  if (r.status !== 302) throw new Error(`set grants failed ${r.status}`);
+/** PUT /api/clients/:id/grants: the complete desired preset set (everything not listed is revoked). */
+export async function setGrants(s: Pick<Stack, "admin">, clientId: string, grants: Array<[string, Cap]>): Promise<void> {
+  const r = await s.admin.putWithCsrf(`/api/clients/${clientId}/grants`, { grants: grants.map(([mailboxId, capability]) => ({ mailboxId, capability })) });
+  if (r.status !== 204) throw new Error(`set grants failed ${r.status} ${await r.text()}`);
 }
 
 export interface ToolResult { isError: boolean; data: any; text: string }
@@ -198,6 +221,11 @@ export class Mcp {
   }
   async tools(): Promise<string[]> {
     return (await this.client.listTools()).tools.map((t) => t.name);
+  }
+  /** Full tool definitions as advertised by tools/list (name, title, annotations, schemas). */
+  async toolDefs() {
+    if (!this.connected) await this.connect();
+    return (await this.client.listTools()).tools;
   }
   async call(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
     if (!this.connected) await this.connect();
@@ -233,9 +261,28 @@ export function refOf(s: Stack, user: string, folder: string, uid: number) {
   return { mailbox: s.mailbox[user], folder, uidValidity: s.fake.folder(user, folder).uidValidity, uid };
 }
 
-/** Creates a mailbox through the UI WITHOUT testing it or choosing a Drafts folder. */
-export async function addMailboxRaw(s: Stack, m: { label: string; host: string; port: number; user: string; pass: string }): Promise<string> {
-  const r = await s.admin.postWithCsrf("/mailboxes/new", "/mailboxes", { label: m.label, host: m.host, port: String(m.port), username: m.user, password: m.pass });
-  if (r.status !== 302) throw new Error(`add mailbox failed: ${r.status}`);
-  return /\/mailboxes\/([^?/]+)/.exec(location(r))![1];
+/** A server with NO admin yet (fresh data dir) and a known bootstrap token, for setup/login/session tests. */
+export interface Bare {
+  work: Workdir;
+  srv: RunningServer;
+  base: string;
+  bootstrap: string;
+  restart(env?: Record<string, string | undefined>): Promise<void>;
+  teardown(): Promise<void>;
+}
+export async function createBare(o: { env?: Record<string, string | undefined> } = {}): Promise<Bare> {
+  const work = makeWorkdir();
+  const bootstrap = "bootstrap-" + randomBytes(10).toString("hex");
+  const env = { ADMIN_BOOTSTRAP_TOKEN: bootstrap, ...o.env };
+  const bare: Bare = {
+    work, bootstrap, srv: await startServer({ work, env }), base: "",
+    async restart(e) {
+      await bare.srv.stop();
+      bare.srv = await startServer({ work, env: { ...env, ...e }, port: bare.srv.port });
+      bare.base = bare.srv.baseUrl;
+    },
+    async teardown() { await bare.srv.stop().catch(() => {}); work.cleanup(); },
+  };
+  bare.base = bare.srv.baseUrl;
+  return bare;
 }

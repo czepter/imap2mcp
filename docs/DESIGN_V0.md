@@ -1,5 +1,7 @@
 # v0 Design Contract ("grob gehalten")
 
+> **Note (Nuxt migration):** this is the v0 design as it was written. Paths such as `src/...`, and mentions of Express, server-rendered pages, `src/web/**` or middleware, describe the code at that time. The domain code now lives in `server/core/`, the admin UI is a Nuxt single-page app over a JSON API (`/api`, header-token CSRF, sealed-cookie sessions) and the server is Nitro; see `docs/NUXT_MIGRATION.md` and `README.md`. The protocol, policy, audit and storage decisions below are unchanged; decisions about the admin UI and its web security are superseded by the migration document.
+
 Binding for all v0 work. Source: `docs/PRD.md`, `docs/VERSION_PLAN.md`. Baseline code is derived from
 upstream mkrasselt1/imap-mcp-server; much of it is replaced. **Single owner, SQLite (better-sqlite3), TypeScript ESM, Node 26 LTS (better-sqlite3 ≥13).**
 

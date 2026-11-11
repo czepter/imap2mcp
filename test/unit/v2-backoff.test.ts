@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let db: Database.Database;
 let withStatusColumn = true;
-vi.mock("../../src/db/database.js", () => ({ getDb: () => db }));
+vi.mock("../../server/core/db/database.js", () => ({ getDb: () => db }));
 
 let connectBehavior: () => Promise<void> = async () => {};
 let constructed = 0;
@@ -17,16 +17,16 @@ vi.mock("imapflow", () => ({
     async logout() { this.usable = false; }
   },
 }));
-vi.mock("../../src/imap/mailboxes.js", () => ({
+vi.mock("../../server/core/imap/mailboxes.js", () => ({
   getMailboxCredentials: () => ({ host: "imap.example.test", port: 993, user: "u", password: "p" }),
 }));
-vi.mock("../../src/imap/ssrf.js", () => ({ assertHostAllowed: async () => ["127.0.0.1"] }));
+vi.mock("../../server/core/imap/ssrf.js", () => ({ assertHostAllowed: async () => ["127.0.0.1"] }));
 
-const client = await import("../../src/imap/client.js");
+const client = await import("../../server/core/imap/client.js");
 const { computeBackoffDelay, withImap, markMailboxAuthFailed, clearMailboxAuthFailure, isMailboxAuthFailed, ImapAuthError, ImapConnectError, resetBackoffForTests, getBackoffState } = client;
-const { readOp, retryDelayMs, MAX_READ_RETRIES } = await import("../../src/mcp/reliability.js");
-const { withBudget } = await import("../../src/imap/budget.js");
-const { ToolError } = await import("../../src/mcp/errors.js");
+const { readOp, retryDelayMs, MAX_READ_RETRIES } = await import("../../server/core/mcp/reliability.js");
+const { withBudget } = await import("../../server/core/imap/budget.js");
+const { ToolError } = await import("../../server/core/mcp/errors.js");
 
 beforeEach(async () => {
   process.env.LOG_LEVEL = "error";

@@ -3,14 +3,14 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { openDatabase } from "../../src/db/database.js";
-import { auditNote } from "../../src/audit/context.js";
-import { withAudit, setAuditDb, classifyResult, auditFailMode } from "../../src/audit/withAudit.js";
-import { insertAuditEvent, queryAudit, countAudit, MAX_AUDIT_UIDS } from "../../src/audit/store.js";
-import { pruneAudit, retentionDays } from "../../src/audit/retention.js";
-import { csvCell, exportLines } from "../../src/audit/export.js";
-import { resolveRequestId } from "../../src/security/requestId.js";
-import { errorResult, ToolError, okResult } from "../../src/mcp/errors.js";
+import { openDatabase } from "../../server/core/db/database.js";
+import { auditNote } from "../../server/core/audit/context.js";
+import { withAudit, setAuditDb, classifyResult, auditFailMode } from "../../server/core/audit/withAudit.js";
+import { insertAuditEvent, queryAudit, countAudit, MAX_AUDIT_UIDS } from "../../server/core/audit/store.js";
+import { pruneAudit, retentionDays } from "../../server/core/audit/retention.js";
+import { csvCell, exportLines } from "../../server/core/audit/export.js";
+import { resolveRequestId } from "../../server/core/security/requestId.js";
+import { errorResult, ToolError, okResult } from "../../server/core/mcp/errors.js";
 
 let h: ReturnType<typeof openDatabase>;
 beforeEach(() => { h = openDatabase(":memory:"); setAuditDb(() => h.raw); delete process.env.AUDIT_FAIL_MODE; });
@@ -252,14 +252,14 @@ describe("audit:export CLI", () => {
       insertAuditEvent({ ts: "2026-03-01T00:00:00.000Z", requestId: RID, clientId: "c", mailboxId: "m", folder: "INBOX", uidValidity: 1, tool: "list_folders", outcome: "ok", errorCode: null, durationMs: 2 }, f.raw);
       f.raw.pragma("wal_checkpoint(TRUNCATE)");
       f.raw.close();
-      const r = spawnSync(process.execPath, ["--import", "tsx", "src/audit/cli.ts", "--from", "2026-02-15", "--format", "csv"], {
+      const r = spawnSync(process.execPath, ["--import", "tsx", "server/core/audit/cli.ts", "--from", "2026-02-15", "--format", "csv"], {
         env: { ...process.env, DATA_DIR: dir }, encoding: "utf8", cwd: process.cwd(),
       });
       expect(r.status).toBe(0);
       const lines = r.stdout.trim().split("\n");
       expect(lines).toHaveLength(2);
       expect(lines[1]).toContain("2026-03-01");
-      const bad = spawnSync(process.execPath, ["--import", "tsx", "src/audit/cli.ts", "--format", "xml"], { env: { ...process.env, DATA_DIR: dir }, encoding: "utf8" });
+      const bad = spawnSync(process.execPath, ["--import", "tsx", "server/core/audit/cli.ts", "--format", "xml"], { env: { ...process.env, DATA_DIR: dir }, encoding: "utf8" });
       expect(bad.status).toBe(1);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });

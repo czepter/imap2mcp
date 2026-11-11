@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 let revoked = false;
 let revokeAfter = Infinity; // number of assertOp calls allowed before policy flips to denied
 let assertCalls = 0;
-vi.mock("../../src/policy/policy.js", () => ({
+vi.mock("../../server/core/policy/policy.js", () => ({
   isOpAllowed: () => !revoked,
   assertOp: () => {
     assertCalls++;
@@ -14,12 +14,12 @@ vi.mock("../../src/policy/policy.js", () => ({
   mailboxHasAllow: () => true,
   allowedMailboxes: () => ["mb"],
 }));
-vi.mock("../../src/db/database.js", () => ({
+vi.mock("../../server/core/db/database.js", () => ({
   getDb: () => ({ prepare: () => ({ get: () => ({ drafts_folder: "Drafts" }), run: () => ({}) }) }),
 }));
-vi.mock("../../src/imap/mailboxes.js", () => ({ getMailboxCredentials: () => ({ host: "h", port: 993, user: "me@example.test", password: "p" }) }));
-vi.mock("../../src/sidecar/index.js", () => ({ sidecarEnabled: () => false, getSidecar: () => { throw new Error("no"); } }));
-vi.mock("../../src/mcp/backend.js", () => ({ getBackend: () => ({}) }));
+vi.mock("../../server/core/imap/mailboxes.js", () => ({ getMailboxCredentials: () => ({ host: "h", port: 993, user: "me@example.test", password: "p" }) }));
+vi.mock("../../server/core/sidecar/index.js", () => ({ sidecarEnabled: () => false, getSidecar: () => { throw new Error("no"); } }));
+vi.mock("../../server/core/mcp/backend.js", () => ({ getBackend: () => ({}) }));
 
 interface Fake {
   mailbox: { uidValidity: bigint };
@@ -37,8 +37,8 @@ interface Fake {
 let fake: Fake;
 let withImapCalls = 0;
 const failConnections: number[] = []; // 1-based withImap call numbers that fail to (re)connect
-vi.mock("../../src/imap/client.js", async (orig) => {
-  const real = await orig<typeof import("../../src/imap/client.js")>();
+vi.mock("../../server/core/imap/client.js", async (orig) => {
+  const real = await orig<typeof import("../../server/core/imap/client.js")>();
   return {
     ...real,
     withImap: async (_id: string, fn: (c: unknown) => unknown) => {
@@ -49,8 +49,8 @@ vi.mock("../../src/imap/client.js", async (orig) => {
   };
 });
 
-const { createDraftTool, moveMessageTool, setFlagsTool } = await import("../../src/mcp/tools.js");
-const { ImapTimeoutError } = await import("../../src/imap/client.js");
+const { createDraftTool, moveMessageTool, setFlagsTool } = await import("../../server/core/mcp/tools.js");
+const { ImapTimeoutError } = await import("../../server/core/imap/client.js");
 const ctx = { tokenId: "t", clientId: "c", scopes: [] } as never;
 const ref = { mailbox: "mb", folder: "INBOX", uidValidity: 5, uid: 10 };
 const dropped = () => Object.assign(new Error("Connection not available"), { code: "NoConnection" });

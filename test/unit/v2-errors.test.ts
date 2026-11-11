@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ImapAuthError, ImapConnectError, ImapTimeoutError } from "../../src/imap/client.js";
-import { ToolError, describeCause, errorPayload, errorResult, normalizeError } from "../../src/mcp/errors.js";
-import { runWithAudit } from "../../src/audit/context.js";
-import { CredentialDecryptError } from "../../src/imap/credentialError.js";
-import { PolicyError } from "../../src/types.js";
+import { ImapAuthError, ImapConnectError, ImapTimeoutError } from "../../server/core/imap/client.js";
+import { ToolError, describeCause, errorPayload, errorResult, normalizeError } from "../../server/core/mcp/errors.js";
+import { runWithAudit } from "../../server/core/audit/context.js";
+import { CredentialDecryptError } from "../../server/core/imap/credentialError.js";
+import { PolicyError } from "../../server/core/types.js";
 import {
   RPC_AUTH, RPC_STALE_REFERENCE, RPC_TIMEOUT, RPC_UPSTREAM, SidecarRpcError, SidecarTimeoutError, SidecarUnavailableError,
-} from "../../src/sidecar/errors.js";
-import { log, redact, redactString, registerSecret, resetLogSecrets, setLogSink } from "../../src/log.js";
+} from "../../server/core/sidecar/errors.js";
+import { log, redact, redactString, registerSecret, resetLogSecrets, setLogSink } from "../../server/core/log.js";
 
 const imapErr = (o: Record<string, unknown>) => Object.assign(new Error("Command failed"), o);
 

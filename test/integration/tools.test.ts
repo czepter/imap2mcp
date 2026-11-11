@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { makeSelfSignedCert } from "../helpers/certs.js";
-import { createStack, obtainToken, Mcp, msg, refOf, ACCOUNTS, type Stack } from "../helpers/stack.js";
+import { createStack, addMailboxRaw, obtainToken, Mcp, msg, refOf, ACCOUNTS, type Stack } from "../helpers/stack.js";
 
 const haveOpenssl = !!makeSelfSignedCert();
 if (!haveOpenssl) console.warn("SKIPPED tools: openssl not available to create the fixture TLS certificate");
@@ -155,8 +155,7 @@ describe.skipIf(!haveOpenssl)("core tools", () => {
     });
 
     it("refuses when the mailbox has no Drafts folder selected", async () => {
-      const r = await s.admin.postWithCsrf("/mailboxes/new", "/mailboxes", { label: "NoDrafts", host: "localhost", port: String(s.fake.port), username: ALICE, password: s.imapPasswords[ALICE] });
-      const id = /\/mailboxes\/([^?/]+)/.exec(r.headers.get("location")!)![1];
+      const id = await addMailboxRaw(s, { label: "NoDrafts", host: "localhost", port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
       const { tokens } = await obtainToken(s, [[id, "draft"]]);
       const c = await new Mcp(s.base, tokens.access_token).connect();
       const d = await c.call("create_draft", { mailbox: id, subject: "s", body: "b" });

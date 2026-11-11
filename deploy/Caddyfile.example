@@ -7,7 +7,7 @@ mcp.example.com {
 		# Streamable HTTP (MCP) can answer with text/event-stream: never buffer, flush immediately.
 		flush_interval -1
 
-		# The app trusts exactly ONE proxy hop (express "trust proxy" = 1) when BASE_URL is https.
+		# The app trusts exactly ONE proxy hop (the last X-Forwarded-For entry) when BASE_URL is https.
 		# Caddy sets X-Forwarded-For / -Proto / -Host itself and overwrites client-supplied values
 		# (no trusted_proxies configured), which is what the app needs.
 		transport http {
@@ -15,6 +15,10 @@ mcp.example.com {
 			dial_timeout 5s
 		}
 	}
+
+	# The admin UI is a single-page app: its hashed files under /_nuxt/ are served by the app with long-lived
+	# "immutable" cache headers and everything else with no-store. Compression above is all that is needed here;
+	# do not add a cache directive that overrides the app's Cache-Control.
 
 	# HSTS is also sent by the app when BASE_URL is https; nothing to add here.
 }

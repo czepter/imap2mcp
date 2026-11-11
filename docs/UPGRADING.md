@@ -18,7 +18,7 @@ On every start the bridge compares the migrations shipped in the image (`drizzle
 
 `GET /readyz` reports `"migrations":"fail"` (503) if any migration shipped in the running build is not applied.
 
-This behavior is exercised by `npm run smoke` (old database -> upgraded image: backup present, 0600, pre-migration contents, data and encrypted secrets intact; and a deliberately conflicting migration: abort, database unchanged).
+The migrations are resolved from `drizzle/` in the image (next to `.output/`, working directory `/app`). This behavior is exercised by `npm run smoke` (old database -> upgraded image: backup present, 0600, pre-migration contents, data and encrypted secrets intact; and a deliberately conflicting migration: abort, database unchanged).
 
 ## Upgrade procedure (roll-forward)
 
@@ -44,6 +44,15 @@ Upgrades are **roll-forward**. A database that has been migrated by a newer buil
 
 - `git pull` only works on a branch. After `git checkout <tag or commit>` you are on a detached HEAD and `git pull` fails with "You are not currently on a branch"; run `git checkout main` first (or `git fetch --tags` and check out the new tag).
 - For production, pin to a release tag instead of tracking `main`: `git fetch --tags && git checkout <tag>`. This repository does not publish release tags yet; until it does, pin to a commit hash and record it.
+
+## Upgrading from the Express-based release to the Nuxt release
+
+The web UI and server were rebuilt on Nuxt 4 / Nitro (a single-page admin UI at the same URLs). What changes for an operator:
+
+- **No database change.** The release adds no migration, so the first start runs no backup and no migration step. The machine-facing endpoints (`/mcp`, `/oauth/*`, `/.well-known/*`, `/healthz`, `/readyz`) keep their paths and behavior; issued OAuth tokens and registered clients keep working.
+- **Admin sessions end once.** The session cookie keeps its name (`imap2mcp.sid`) but is now a sealed cookie instead of an id into an in-memory store, so the old cookie is not accepted: sign in again after the upgrade. From then on a restart no longer signs you out.
+- **Entrypoint.** The image starts `node .output/server/index.mjs` (it was `node dist/index.js`) and still listens on `PORT` (default 3000). A `command:` or `entrypoint:` override in your own compose file must be updated; the stock `docker-compose.yml` needs no change. The audit export is still `node dist/audit/cli.js`.
+- **Rollback** to the Express image is possible with the same database, because no migration was added; admin sessions end again.
 
 ## Manual backup (online)
 
@@ -93,7 +102,7 @@ docker tag imap2mcp:prev imap2mcp:local             # the tag you saved before b
 docker compose up -d                                # no --build: it must not rebuild over the old image
 ```
 
-If you did not save `imap2mcp:prev`, rebuild from the old source: `git checkout <previous tag or commit> && docker compose build && docker compose up -d`. This can fail for old commits: the v1 Dockerfile installed production dependencies in the final stage without build tools, so when `better-sqlite3` has no prebuilt binary for the current `node:22-slim` base image, `npm ci` there tries to compile it and fails (no `python3`/`make`/`g++`). The current Dockerfile compiles in a separate build stage that has those tools and copies the result. Prefer the saved image, or cherry-pick the current `Dockerfile` onto the old checkout. (Derived from comparing the two Dockerfiles; the old commit was not rebuilt here.)
+If you did not save `imap2mcp:prev`, rebuild from the old source: `git checkout <previous tag or commit> && docker compose build && docker compose up -d`. This can fail for old commits: the v1 Dockerfile installed production dependencies in the final stage without build tools, so when `better-sqlite3` has no prebuilt binary for the `node:22-slim` base image of that time, `npm ci` there tries to compile it and fails (no `python3`/`make`/`g++`). The current Dockerfile builds in a separate stage and copies only the traced runtime files into the final image; `better-sqlite3` 13 ships prebuilt binaries, so no compiler is needed in either stage. Prefer the saved image, or cherry-pick the current `Dockerfile` onto the old checkout. (Derived from comparing the two Dockerfiles; the old commit was not rebuilt here.)
 
 ### C. Restore only the data, keep whatever code is running
 
