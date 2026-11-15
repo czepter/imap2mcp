@@ -1,5 +1,5 @@
 import { getSidecar } from "../sidecar/index.js";
-import type { Addr, BodyResult, FolderInfo, Header, PageResult, ReadBackend } from "./backend.js";
+import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, FolderInfo, Header, PageResult, ReadBackend } from "./backend.js";
 
 const SIDECAR_CAP = 500;
 
@@ -25,6 +25,14 @@ function header(h: Partial<Header> & { uid: number }, fallbackUidValidity: numbe
 }
 
 const clampLimit = (n: number) => Math.min(Math.max(1, n), SIDECAR_CAP);
+
+type WireAttachment = { part: string; filename?: string; contentType?: string; disposition?: string; contentId?: string; size?: number };
+function attachment(a: WireAttachment): AttachmentInfo {
+  return {
+    part: a.part, filename: a.filename || null, contentType: a.contentType || "application/octet-stream",
+    disposition: a.disposition || null, contentId: a.contentId || null, size: Number(a.size ?? 0),
+  };
+}
 
 export const sidecarBackend: ReadBackend = {
   async listFolders(mailbox): Promise<FolderInfo[]> {
@@ -55,8 +63,18 @@ export const sidecarBackend: ReadBackend = {
   },
 
   async fetchBody(mailbox, folder, uidValidity, uid, maxBytes): Promise<BodyResult> {
-    const r = await getSidecar().callMailbox<{ text?: string; html?: string; truncated?: boolean }>(
+    const r = await getSidecar().callMailbox<{ text?: string; html?: string; truncated?: boolean; attachments?: WireAttachment[] }>(
       mailbox, "fetchBody", { folder, uidValidity, uid, maxBytes });
-    return { text: r.text, html: r.html, truncated: !!r.truncated };
+    return { text: r.text, html: r.html, truncated: !!r.truncated, attachments: (r.attachments ?? []).map(attachment) };
+  },
+
+  async fetchAttachment(mailbox, folder, uidValidity, uid, part, maxBytes): Promise<AttachmentResult> {
+    const r = await getSidecar().callMailbox<{ found: boolean; attachment?: WireAttachment; tooLarge?: boolean; data?: string }>(
+      mailbox, "fetchAttachment", { folder, uidValidity, uid, part, maxBytes });
+    if (!r.found || !r.attachment) return { found: false };
+    return {
+      found: true, attachment: attachment(r.attachment), tooLarge: !!r.tooLarge,
+      data: typeof r.data === "string" ? Buffer.from(r.data, "base64") : undefined,
+    };
   },
 };

@@ -27,7 +27,7 @@ describe.skipIf(!haveOpenssl)("core tools", () => {
   const log = () => s.fake.commandsFor(ALICE);
 
   it("exposes exactly the v0 tool set (and no send/delete tool)", async () => {
-    expect((await mcp.tools()).sort()).toEqual(["create_draft", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"]);
+    expect((await mcp.tools()).sort()).toEqual(["create_draft", "get_attachment", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"]);
   });
 
   it("list_mailboxes returns ids and labels only, no connection details", async () => {
@@ -119,6 +119,73 @@ describe.skipIf(!haveOpenssl)("core tools", () => {
       const mv = await mcp.call("move_message", { ref, destination: "Archive" });
       expect(mv.data.code).toBe("STALE_REFERENCE");
       s.fake.folder(ALICE, "Sent").messages.length = 0;
+    });
+  });
+
+  describe("attachments", () => {
+    const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(3000, 0xa5), Buffer.from("\n%%EOF")]);
+    const b64 = pdf.toString("base64").replace(/.{76}/g, "$&\r\n");
+    const text = "see attached\r\n";
+    const raw = "From: Vendor <offers@vendor.example>\r\nTo: alice@example.test\r\nSubject: Angebot\r\nMIME-Version: 1.0\r\n"
+      + "Content-Type: multipart/mixed; boundary=MM\r\n\r\n"
+      + `--MM\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`
+      + `--MM\r\nContent-Type: application/pdf; name="Angebot.pdf"\r\nContent-Disposition: attachment; filename="Angebot.pdf"\r\nContent-Transfer-Encoding: base64\r\n\r\n${b64}\r\n`
+      + "--MM--\r\n";
+    const add = () => {
+      const m = s.fake.addMessage(ALICE, "INBOX", raw);
+      m.mime = {
+        bodystructure: `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" ${text.length} 1 NIL NIL NIL NIL)`
+          + `("APPLICATION" "PDF" ("NAME" "Angebot.pdf") NIL NIL "BASE64" ${b64.length} NIL ("ATTACHMENT" ("FILENAME" "Angebot.pdf")) NIL NIL)`
+          + ` "MIXED" ("BOUNDARY" "MM") NIL NIL NIL)`,
+        sections: { "1": Buffer.from(text), "2": Buffer.from(b64) },
+      };
+      return refOf(s, ALICE, "INBOX", m.uid);
+    };
+
+    it("read_message lists attachments and get_attachment returns the file without setting \\Seen", async () => {
+      const ref = add();
+      s.fake.clearLog();
+      const read = await mcp.call("read_message", { ref });
+      expect(read.isError).toBe(false);
+      expect(read.data.body).toContain("see attached");
+      expect(read.data.attachments).toHaveLength(1);
+      expect(read.data.attachments[0]).toMatchObject({ part: "2", filename: "Angebot.pdf", contentType: "application/pdf", disposition: "attachment" });
+      expect(Math.abs(read.data.attachments[0].size - pdf.length)).toBeLessThan(100);
+
+      const r = await mcp.callContent("get_attachment", { ref, part: "2" });
+      expect(r.isError).toBe(false);
+      expect(JSON.parse(r.content[0].text)).toMatchObject({ part: "2", filename: "Angebot.pdf", contentType: "application/pdf", size: pdf.length });
+      expect(r.content[1].type).toBe("resource");
+      expect(r.content[1].resource.mimeType).toBe("application/pdf");
+      expect(Buffer.from(r.content[1].resource.blob, "base64").equals(pdf)).toBe(true);
+
+      const msg = s.fake.folder(ALICE, "INBOX").messages.find((x) => x.uid === ref.uid)!;
+      expect(msg.flags.has("\\Seen")).toBe(false);
+      const wire = log().join("\n");
+      expect(wire).not.toMatch(/BODY\[/);
+      expect(wire).toMatch(/BODY\.PEEK\[2\]/);
+    });
+
+    it("only listed attachment parts can be fetched", async () => {
+      const ref = add();
+      const body = await mcp.call("get_attachment", { ref, part: "1" });
+      expect(body.isError).toBe(true);
+      expect(body.data.code).toBe("NOT_FOUND");
+      const none = await mcp.call("get_attachment", { ref, part: "7" });
+      expect(none.data.code).toBe("NOT_FOUND");
+      const bad = await mcp.call("get_attachment", { ref, part: "2;x" }).catch((e) => ({ isError: true, data: String(e) }));
+      expect(bad.isError).toBe(true);
+    });
+
+    it("needs read access to the folder", async () => {
+      const ref = add();
+      const { tokens } = await obtainToken(s, [[box, "organize"]]);
+      const other = await new Mcp(s.base, tokens.access_token).connect();
+      try {
+        const r = await other.call("get_attachment", { ref, part: "2" });
+        expect(r.isError).toBe(true);
+        expect(r.data.code).toBe("FORBIDDEN");
+      } finally { await other.close(); }
     });
   });
 

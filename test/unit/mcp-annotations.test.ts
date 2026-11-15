@@ -11,8 +11,8 @@ describe("MCP tool annotations (clients categorize tools by these hints)", () =>
     await Promise.all([server.connect(a), client.connect(b)]);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["create_draft", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"]);
-    const readOnly = new Set(["list_mailboxes", "list_folders", "search_messages", "read_message"]);
+      ["create_draft", "get_attachment", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"]);
+    const readOnly = new Set(["list_mailboxes", "list_folders", "search_messages", "read_message", "get_attachment"]);
     for (const t of tools) {
       expect(t.title, t.name).toBeTruthy();
       const an = t.annotations!;

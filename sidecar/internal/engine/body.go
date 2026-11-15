@@ -18,11 +18,13 @@ const (
 	hardMaxBody    = 10 << 20
 )
 
-// Body is the decoded text/html of a message. Bodies are never cached.
+// Body is the decoded text/html of a message plus its attachment list.
+// Bodies are never cached.
 type Body struct {
-	Text      string
-	HTML      string
-	Truncated bool
+	Text        string
+	HTML        string
+	Truncated   bool
+	Attachments []Attachment
 }
 
 // FetchBody fetches a message with BODY.PEEK and extracts text/plain and
@@ -59,6 +61,7 @@ func (e *Engine) FetchBody(ctx context.Context, id, folder string, uv, uid uint3
 	}
 	b := parseBody(rb.Bytes, maxBytes)
 	b.Truncated = b.Truncated || rb.Truncated
+	b.Attachments = attachmentsOf(rb.Structure)
 	return b, nil
 }
 
