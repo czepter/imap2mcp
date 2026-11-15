@@ -92,6 +92,20 @@ export function revokePreset(db: Database.Database, clientId: string, mailboxId:
     .run(clientId, mailboxId, ...PRESET_OPS[cap]);
 }
 
+/**
+ * Make the client's preset grants exactly `desired` ("mailboxId|capability" keys) across the given mailboxes: add
+ * the missing presets, remove the ones left out. Caller owns the transaction.
+ */
+export function applyGrantSet(db: Database.Database, clientId: string, mailboxIds: readonly string[], desired: ReadonlySet<string>): void {
+  const caps: Capability[] = ["read", "draft", "organize"];
+  for (const mailboxId of mailboxIds) for (const cap of caps) {
+    const want = desired.has(`${mailboxId}|${cap}`);
+    const have = presetActive(db, clientId, mailboxId, cap);
+    if (want && !have) grantPreset(db, clientId, mailboxId, cap);
+    else if (!want && have) revokePreset(db, clientId, mailboxId, cap);
+  }
+}
+
 /** Display helper: (client, mailbox, capability) triples that have at least one allow rule (for dashboards). */
 export function capabilityRows(db: Database.Database, where: { clientId?: string; mailboxId?: string } = {}): Array<{ client_id: string; mailbox_id: string; capability: Capability }> {
   const rows = db

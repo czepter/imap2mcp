@@ -68,7 +68,9 @@ async function revokeToken(t: TokenSummary) {
         <TableBody>
           <template v-for="t in tokens" :key="t.id">
             <TableRow>
-              <TableCell class="max-w-56 font-semibold break-words">{{ t.clientName || t.clientId }}</TableCell>
+              <TableCell class="max-w-56 font-semibold break-words">
+                <NuxtLink :to="`/clients/${encodeURIComponent(t.clientId)}`" class="hover:underline">{{ t.clientName || t.clientId }}</NuxtLink>
+              </TableCell>
               <TableCell>
                 <template v-if="t.reach.length">
                   <div v-for="r in t.reach" :key="r.mailboxId">{{ r.mailboxLabel }} <CapabilityBadges :capabilities="r.capabilities" /></div>
@@ -78,6 +80,9 @@ async function revokeToken(t: TokenSummary) {
               <TableCell class="text-muted-foreground text-[13px]">{{ formatIssued(t.createdAt) }}</TableCell>
               <TableCell class="text-muted-foreground text-[13px]">{{ formatExpires(t.expiresAt) }}</TableCell>
               <TableCell class="r">
+                <Button as-child variant="outline" size="sm" class="mr-2">
+                  <NuxtLink :to="`/tokens/${encodeURIComponent(t.id)}`">Manage<span class="sr-only"> token of {{ t.clientName || t.clientId }}</span></NuxtLink>
+                </Button>
                 <Button variant="outline" size="sm" class="btn-d" :aria-expanded="confirmingId === t.id" :aria-controls="`revoke-${t.id}`" @click="toggleRevoke(t)">
                   Revoke<span class="sr-only"> token of {{ t.clientName || t.clientId }}</span>
                 </Button>

@@ -81,8 +81,26 @@ export interface TokenSummary {
   clientName: string;
   /** Capabilities the token could use right now: scope ceiling intersected with live grants, per mailbox. */
   reach: { mailboxId: string; mailboxLabel: string; capabilities: Capability[] }[];
+  /** The capability ceiling of the token (its scopes), independent of the grants. */
+  scopes: Capability[];
   createdAt: string;
   expiresAt: string;
+}
+
+export interface TokenDetail {
+  token: TokenSummary;
+  client: ClientSummary;
+  /** Grants of the token's client per mailbox (shared by all of the client's tokens). */
+  mailboxes: ClientDetail["mailboxes"];
+  /** Other live tokens of the same client; they share its grants. */
+  otherActiveTokenCount: number;
+}
+
+export interface TokenUpdate {
+  /** The new ceiling; at least one. */
+  capabilities: Capability[];
+  /** The complete desired preset set of the client (same semantics as PUT /api/clients/:id/grants). */
+  grants: GrantsUpdate["grants"];
 }
 
 export interface Overview {

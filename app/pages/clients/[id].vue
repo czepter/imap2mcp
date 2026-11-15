@@ -196,7 +196,7 @@ watch([disableOpen, revokeOpen], () => { dialogError.value = ""; });
             <form @submit.prevent="saveGrants">
               <p class="text-muted-foreground px-[18px] pt-[18px] text-[13px]">
                 Removing a grant applies on the next call, even for tokens already issued. Adding a capability the token
-                was not authorized for needs a new authorization.
+                was not authorized for needs a new authorization, or raise it under Tokens on the token's Manage page.
               </p>
               <div v-if="grantsError || grantsStatus" class="px-[18px] pt-3">
                 <ErrorAlert :error="grantsError" />

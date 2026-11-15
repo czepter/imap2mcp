@@ -64,6 +64,8 @@ beforeAll(async () => {
     ["post", "/api/clients/:id/disable", "clients/[id]/disable.post"],
     ["post", "/api/clients/:id/enable", "clients/[id]/enable.post"],
     ["post", "/api/clients/:id/revoke", "clients/[id]/revoke.post"],
+    ["get", "/api/tokens/:id", "tokens/[id]/index.get"],
+    ["patch", "/api/tokens/:id", "tokens/[id]/index.patch"],
     ["post", "/api/tokens/:id/revoke", "tokens/[id]/revoke.post"],
     ["get", "/api/audit", "audit/index.get"],
     ["get", "/api/audit/export.jsonl", "audit/export.jsonl.get"],
