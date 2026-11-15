@@ -1,4 +1,4 @@
-import type { Capability, ClientDetail, Grant, Operation, Overview, Rule, TokenSummary } from "../../shared/types/api";
+import type { Capability, ClientDetail, Grant, Operation, Overview, Rule, TokenDetail, TokenSummary } from "../../shared/types/api";
 import { getDb } from "../core/db/database.js";
 import { config } from "../core/config.js";
 import { listMailboxes } from "../core/imap/mailboxes.js";
@@ -65,9 +65,57 @@ export function buildOverview(): Overview {
       clientId: t.client_id,
       clientName: t.client_name || t.client_id, // the old token table fell back to the id, not "(unnamed)"
       reach: tokenReach(t.scopes, t.client_id, mailboxes, granted),
+      scopes: scopesToCaps(t.scopes),
       createdAt: isoTs(t.created_at),
       expiresAt: isoTs(t.expires_at),
     })),
+  };
+}
+
+export interface LiveTokenRow { id: string; client_id: string; scopes: string; resource: string; expires_at: string; created_at: string }
+
+/** A token that is not revoked and still usable or refreshable (the overview's liveness rule). */
+export function getLiveToken(id: string): LiveTokenRow | undefined {
+  const now = new Date().toISOString();
+  return getDb().prepare(
+    `SELECT id, client_id, scopes, resource, expires_at, created_at FROM oauth_tokens
+      WHERE id = ? AND revoked = 0 AND (expires_at > ? OR (refresh_expires_at IS NOT NULL AND refresh_expires_at > ?))`,
+  ).get(id, now, now) as LiveTokenRow | undefined;
+}
+
+export function buildTokenDetail(t: LiveTokenRow): TokenDetail {
+  const db = getDb();
+  const mailboxes = listMailboxes();
+  const client = getClientRow(t.client_id)!;
+  const granted = new Map<string, Set<string>>();
+  for (const g of capabilityRows(db, { clientId: t.client_id })) {
+    const k = `${g.client_id}:${g.mailbox_id}`;
+    if (!granted.has(k)) granted.set(k, new Set());
+    granted.get(k)!.add(g.capability);
+  }
+  const now = new Date().toISOString();
+  const others = (db.prepare(
+    `SELECT COUNT(*) AS n FROM oauth_tokens WHERE client_id = ? AND id <> ? AND revoked = 0
+        AND (expires_at > ? OR (refresh_expires_at IS NOT NULL AND refresh_expires_at > ?))`,
+  ).get(t.client_id, t.id, now, now) as { n: number }).n;
+  return {
+    token: {
+      id: t.id,
+      clientId: t.client_id,
+      clientName: client.client_name || t.client_id,
+      reach: tokenReach(t.scopes, t.client_id, mailboxes, granted),
+      scopes: scopesToCaps(t.scopes),
+      createdAt: isoTs(t.created_at),
+      expiresAt: isoTs(t.expires_at),
+    },
+    client: toClientSummary(client),
+    mailboxes: mailboxes.map((m) => ({
+      id: m.id,
+      label: m.label,
+      draftsFolder: m.drafts_folder,
+      granted: Object.fromEntries(CAPABILITIES.map((cap) => [cap, presetActive(db, t.client_id, m.id, cap)])) as Record<Capability, boolean>,
+    })),
+    otherActiveTokenCount: others,
   };
 }
 
