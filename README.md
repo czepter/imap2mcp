@@ -14,7 +14,7 @@ A single-owner bridge that lets AI agents use your IMAP mailboxes through the [M
 
   | Operation | Needs OAuth scope | Tools |
   |---|---|---|
-  | `search`, `read_headers`, `read_body` | `mail:read` | `list_folders`, `search_messages`, `read_message` |
+  | `search`, `read_headers`, `read_body` | `mail:read` | `list_folders`, `search_messages`, `read_message`, `get_attachment` |
   | `draft` | `mail:draft` | `create_draft` (Drafts folder only) |
   | `move`, `flag` | `mail:organize` | `move_message` (needs `move` on source **and** destination folder), `set_flags` |
 

@@ -14,6 +14,8 @@ export interface FakeMessage {
   flags: Set<string>;
   raw: Buffer;
   date: Date;
+  /** Multipart messages: the BODYSTRUCTURE to report and the bytes of numbered sections (e.g. "2"). */
+  mime?: { bodystructure: string; sections: Record<string, Buffer> };
 }
 export interface FakeFolder {
   name: string;
@@ -758,6 +760,7 @@ export class FakeImapServer {
       } else if (it === "INTERNALDATE") str(`INTERNALDATE "${fmtDate(m.date)}"`);
       else if (it === "RFC822.SIZE") str(`RFC822.SIZE ${m.raw.length}`);
       else if (it === "ENVELOPE") str(`ENVELOPE ${envelope(headerBuf.toString("utf8"))}`);
+      else if (it === "BODYSTRUCTURE" && m.mime) str(`BODYSTRUCTURE ${m.mime.bodystructure}`);
       else if (it === "BODYSTRUCTURE" || it === "BODY") {
         const lines = bodyBuf.toString("utf8").split("\n").length;
         str(`${it} ("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" ${bodyBuf.length} ${lines}${it === "BODYSTRUCTURE" ? " NIL NIL NIL" : ""})`);
@@ -771,7 +774,8 @@ export class FakeImapServer {
         const section = mm[2];
         let data: Buffer;
         const secU = section.toUpperCase();
-        if (section === "") data = m.raw;
+        if (m.mime?.sections[secU]) data = m.mime.sections[secU];
+        else if (section === "") data = m.raw;
         else if (secU === "HEADER") data = headerBuf;
         else if (secU === "TEXT" || /^1(\.TEXT)?$/.test(secU) || secU === "1.1") data = bodyBuf;
         else if (secU.startsWith("HEADER.FIELDS")) {

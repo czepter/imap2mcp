@@ -2,11 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TokenContext } from "../types.js";
 import { ToolError, errorResult, normalizeError, okResult } from "./errors.js";
+import type { ToolResult } from "../audit/withAudit.js";
 import { withAudit } from "../audit/withAudit.js";
 import { resolveRequestId } from "../security/requestId.js";
 import {
-  MAX_BATCH, MAX_PAGE, createDraftTool, listFoldersTool, listMailboxesTool, moveMessageTool,
-  readMessageTool, searchMessagesTool, setFlagsTool,
+  MAX_ATTACHMENT_BYTES, MAX_BATCH, MAX_PAGE, createDraftTool, getAttachmentTool, listFoldersTool, listMailboxesTool,
+  moveMessageTool, readMessageTool, searchMessagesTool, setFlagsTool, type AttachmentOut,
 } from "./tools.js";
 
 const mailboxId = z.string().min(1).max(128);
@@ -18,6 +19,26 @@ const ref = z.object({
 }).describe("Message reference as returned by search_messages / create_draft / move_message");
 const email = z.string().min(3).max(320);
 
+const INLINE_IMAGE = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const isTextual = (t: string) => t.startsWith("text/") || /^application\/(json|xml|[\w.+-]+\+(json|xml))$/.test(t);
+
+/**
+ * First item: JSON metadata (the audit layer reads it). Second item: the file itself, as an image for common image
+ * types, as text for textual types, otherwise as a base64 resource blob.
+ */
+export function attachmentResult(r: AttachmentOut): ToolResult {
+  const { data, ...meta } = r;
+  const { mailbox, folder, uidValidity, uid } = r.ref;
+  const uri = `imap2mcp://attachment/${[mailbox, folder, uidValidity, uid, r.part].map((x) => encodeURIComponent(String(x))).join("/")}`
+    + (r.filename ? `/${encodeURIComponent(r.filename)}` : "");
+  const file = INLINE_IMAGE.has(r.contentType)
+    ? { type: "image" as const, data: data.toString("base64"), mimeType: r.contentType }
+    : isTextual(r.contentType)
+      ? { type: "resource" as const, resource: { uri, mimeType: r.contentType, text: data.toString("utf8") } }
+      : { type: "resource" as const, resource: { uri, mimeType: r.contentType, blob: data.toString("base64") } };
+  return { content: [{ type: "text" as const, text: JSON.stringify(meta) }, file] } as unknown as ToolResult;
+}
+
 /**
  * Build a server whose tool handlers close over the token context of THIS request only.
  * Each handler re-checks policy against live DB grants (inside the tool functions).
@@ -28,10 +49,13 @@ export function createMcpServer(ctx: TokenContext, opts: { requestId?: string } 
   const requestId = opts.requestId ?? resolveRequestId(undefined);
 
   // Every tool attempt runs inside withAudit: exactly one audit row is written before the result is returned.
-  const wrap = <A>(tool: string, mutating: boolean, fn: (ctx: TokenContext, a: A) => unknown | Promise<unknown>) =>
+  const wrap = <A, R = unknown>(
+    tool: string, mutating: boolean, fn: (ctx: TokenContext, a: A) => R | Promise<R>,
+    toResult: (r: R) => ToolResult = okResult,
+  ) =>
     async (a: A) =>
       withAudit({ tool, clientId: ctx.clientId, requestId, mutating }, a, async () => {
-        try { return okResult(await fn(ctx, a)); }
+        try { return toResult(await fn(ctx, a)); }
         catch (e) { return errorResult(e instanceof ToolError ? e : normalizeError(e, mutating), requestId); }
       });
 
@@ -67,9 +91,16 @@ export function createMcpServer(ctx: TokenContext, opts: { requestId?: string } 
   server.registerTool("read_message", {
     title: "Read message",
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-    description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. Does not set \\Seen.",
+    description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. With the body you also get `attachments` (part, filename, contentType, approximate size); fetch one with get_attachment. Does not set \\Seen.",
     inputSchema: { ref, include: z.array(z.enum(["headers", "body"])).min(1).max(2).optional().describe('Default: both') },
   }, wrap("read_message", false, readMessageTool));
+
+  server.registerTool("get_attachment", {
+    title: "Get attachment",
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+    description: `Download one attachment of a message (max ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB). part is the value from read_message attachments. Returns metadata, then the file: images inline, text types as text, everything else (e.g. PDF) as a base64 resource. Needs the same permission as reading the body. Does not set \\Seen.`,
+    inputSchema: { ref, part: z.string().regex(/^[1-9]\d{0,4}(\.[1-9]\d{0,4}){0,10}$/).describe('IMAP part number from read_message attachments, e.g. "2" or "1.2"') },
+  }, wrap("get_attachment", false, getAttachmentTool, attachmentResult));
 
   server.registerTool("create_draft", {
     title: "Create draft",

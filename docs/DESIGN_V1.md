@@ -57,7 +57,8 @@ Existing seven tools keep names and schemas (additive fields only). `search_mess
 | `search` | `{mailboxId, folder, criteria, limit, beforeUid?}` | same shape as list |
 | `searchText` | `{mailboxId, folder, text, limit}` | remote IMAP search, `{uidValidity, uids:[...]}` |
 | `fetchHeaders` | `{mailboxId, folder, uidValidity, uids[]}` | `{items:[Header]}`; stale uidValidity => error `STALE_REFERENCE` (-32010) |
-| `fetchBody` | `{mailboxId, folder, uidValidity, uid, maxBytes}` | `{text, html?, truncated}` using BODY.PEEK |
+| `fetchBody` | `{mailboxId, folder, uidValidity, uid, maxBytes}` | `{text, html?, truncated, attachments:[{part, filename?, contentType, disposition?, contentId?, size}]}` using BODY.PEEK; the attachment list comes from BODYSTRUCTURE in the same FETCH |
+| `fetchAttachment` | `{mailboxId, folder, uidValidity, uid, part, maxBytes}` | `{found:false}` if `part` is not an attachment of the message, else `{found:true, attachment, tooLarge, data?}` with `data` the decoded bytes (base64 in JSON); BODY.PEEK[part] |
 | `invalidate` | `{mailboxId, folder?}` | `{ok:true}` marks stale; next call syncs |
 | `stats` | – | cache sizes, last sync times |
 `Header = {uid, uidValidity, flags[], subject, from[], to[], cc[], date, messageId, size}`. Errors use JSON-RPC error `{code,message}` with codes: -32001 auth, -32002 unknown mailbox (Node must `open` and retry once), -32010 stale ref, -32020 upstream error (message redacted of credentials), -32030 timeout. Per-request upstream timeout 30 s.

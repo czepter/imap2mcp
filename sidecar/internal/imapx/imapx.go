@@ -642,9 +642,11 @@ type RawBody struct {
 	Size      int64
 	Truncated bool
 	Found     bool
+	// Structure is the message's BODYSTRUCTURE (nil if the server sent none).
+	Structure imap.BodyStructure
 }
 
-// FetchRaw runs UID FETCH uid (RFC822.SIZE BODY.PEEK[]<0.max>).
+// FetchRaw runs UID FETCH uid (RFC822.SIZE BODYSTRUCTURE BODY.PEEK[]<0.max>).
 func (a *Account) FetchRaw(ctx context.Context, folder string, uid uint32, max int64) (RawBody, error) {
 	var rb RawBody
 	err := a.with(ctx, func(c *imapclient.Client) error {
@@ -659,6 +661,7 @@ func (a *Account) FetchRaw(ctx context.Context, folder string, uid uint32, max i
 		}
 		msgs, err := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
 			UID: true, RFC822Size: true, BodySection: []*imap.FetchItemBodySection{sec},
+			BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
 		}).Collect()
 		if err != nil {
 			return err
@@ -669,6 +672,7 @@ func (a *Account) FetchRaw(ctx context.Context, folder string, uid uint32, max i
 			}
 			rb.Found = true
 			rb.Size = m.RFC822Size
+			rb.Structure = m.BodyStructure
 			if len(m.BodySection) > 0 {
 				rb.Bytes = m.BodySection[0].Bytes
 			}
@@ -680,4 +684,51 @@ func (a *Account) FetchRaw(ctx context.Context, folder string, uid uint32, max i
 		return RawBody{}, err
 	}
 	return rb, nil
+}
+
+// RawPart is one (possibly truncated) MIME part, still transfer-encoded.
+type RawPart struct {
+	Selected  Selected
+	Structure imap.BodyStructure
+	Bytes     []byte
+	Found     bool
+}
+
+// FetchPart runs UID FETCH uid (BODYSTRUCTURE BODY.PEEK[part]<0.max>). The
+// part bytes are returned as stored on the server (transfer-encoded).
+func (a *Account) FetchPart(ctx context.Context, folder string, uid uint32, part []int, max int64) (RawPart, error) {
+	var rp RawPart
+	err := a.with(ctx, func(c *imapclient.Client) error {
+		var err error
+		rp = RawPart{}
+		if rp.Selected, err = examine(c, folder); err != nil {
+			return err
+		}
+		sec := &imap.FetchItemBodySection{Peek: true, Part: part}
+		if max > 0 {
+			sec.Partial = &imap.SectionPartial{Offset: 0, Size: max}
+		}
+		msgs, err := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+			UID: true, BodySection: []*imap.FetchItemBodySection{sec},
+			BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
+		}).Collect()
+		if err != nil {
+			return err
+		}
+		for _, m := range msgs {
+			if uint32(m.UID) != uid {
+				continue
+			}
+			rp.Found = true
+			rp.Structure = m.BodyStructure
+			if len(m.BodySection) > 0 {
+				rp.Bytes = m.BodySection[0].Bytes
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return RawPart{}, err
+	}
+	return rp, nil
 }

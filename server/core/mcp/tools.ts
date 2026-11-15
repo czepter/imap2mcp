@@ -19,6 +19,7 @@ import { assertMailboxUsable } from "./reliability.js";
 export const MAX_PAGE = 50;
 export const MAX_BATCH = 25;
 export const MAX_BODY_BYTES = 200 * 1024;
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 export interface MessageRef { mailbox: string; folder: string; uidValidity: number; uid: number }
 
@@ -411,12 +412,34 @@ async function readMessageImpl(ctx: TokenContext, a: { ref: MessageRef; include?
     if (Buffer.byteLength(text) > MAX_BODY_BYTES) { text = Buffer.from(text).subarray(0, MAX_BODY_BYTES).toString("utf8"); truncated = true; }
     Object.assign(out, {
       bodyType: bodyOut.text ? "text/plain" : bodyOut.html ? "text/html" : null,
-      body: text, truncated, attachments: [],
+      body: text, truncated, attachments: bodyOut.attachments,
     });
   } else if (want.has("body")) {
     out.bodyDenied = true; // the caller learns only about its own rights, never about the mailbox
   }
   return out;
+}
+
+// ---------- get_attachment ----------
+export interface AttachmentOut {
+  ref: MessageRef; part: string; filename: string | null; contentType: string; size: number; data: Buffer;
+}
+
+/** Attachments are part of the message body: reading one needs read_body on the folder, like read_message. */
+async function getAttachmentImpl(ctx: TokenContext, a: { ref: MessageRef; part: string }): Promise<AttachmentOut> {
+  const { ref } = a;
+  auditNote({ mailboxId: ref.mailbox, folder: ref.folder, uidValidity: ref.uidValidity, uids: [ref.uid] });
+  if (!isOpAllowed(ctx, ref.mailbox, ref.folder, "read_body")) deniedRead(ctx, ref);
+  const r = await getBackend().fetchAttachment(ref.mailbox, ref.folder, ref.uidValidity, ref.uid, a.part, MAX_ATTACHMENT_BYTES);
+  // Recheck after the data arrived: a revocation in the meantime withholds it.
+  if (!isOpAllowed(ctx, ref.mailbox, ref.folder, "read_body")) deniedRead(ctx, ref);
+  if (!r.found || !r.attachment) throw new ToolError("NOT_FOUND", "Attachment not found; use a part listed in read_message attachments");
+  if (r.tooLarge || !r.data) {
+    throw new ToolError("UNSUPPORTED", `Attachment is larger than ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB and cannot be returned`,
+      { size: r.attachment.size, limit: MAX_ATTACHMENT_BYTES });
+  }
+  const { filename, contentType } = r.attachment;
+  return { ref, part: a.part, filename, contentType, size: r.data.length, data: r.data };
 }
 
 // ---------- create_draft ----------
@@ -726,6 +749,7 @@ async function setFlagsImpl(ctx: TokenContext, a: { refs: MessageRef[]; add?: st
 export const listFoldersTool = (ctx: TokenContext, a: { mailbox: string }) => withBudget(() => listFoldersImpl(ctx, a));
 export const searchMessagesTool = (ctx: TokenContext, a: SearchArgs) => withBudget(() => searchMessagesImpl(ctx, a));
 export const readMessageTool = (ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) => withBudget(() => readMessageImpl(ctx, a));
+export const getAttachmentTool = (ctx: TokenContext, a: { ref: MessageRef; part: string }) => withBudget(() => getAttachmentImpl(ctx, a));
 export const createDraftTool = (ctx: TokenContext, a: DraftArgs) => withBudget(() => createDraftImpl(ctx, a));
 export const moveMessageTool = (ctx: TokenContext, a: { ref: MessageRef; destination: string }) => withBudget(() => moveMessageImpl(ctx, a));
 export const setFlagsTool = (ctx: TokenContext, a: { refs: MessageRef[]; add?: string[]; remove?: string[] }) => withBudget(() => setFlagsImpl(ctx, a));

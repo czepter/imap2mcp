@@ -543,9 +543,33 @@ func (s *Server) call(ctx context.Context, method string, raw json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		res := map[string]any{"text": b.Text, "truncated": b.Truncated}
+		res := map[string]any{"text": b.Text, "truncated": b.Truncated, "attachments": b.Attachments}
 		if b.HTML != "" {
 			res["html"] = b.HTML
+		}
+		return res, nil
+	case "fetchAttachment":
+		var p struct {
+			MailboxID   string `json:"mailboxId"`
+			Folder      string `json:"folder"`
+			UIDValidity uint32 `json:"uidValidity"`
+			UID         uint32 `json:"uid"`
+			Part        string `json:"part"`
+			MaxBytes    int64  `json:"maxBytes"`
+		}
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		a, err := s.eng.FetchAttachment(ctx, p.MailboxID, p.Folder, p.UIDValidity, p.UID, p.Part, p.MaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if a.NotFound {
+			return map[string]any{"found": false}, nil
+		}
+		res := map[string]any{"found": true, "attachment": a.Attachment, "tooLarge": a.TooLarge}
+		if a.Data != nil {
+			res["data"] = a.Data
 		}
 		return res, nil
 	}

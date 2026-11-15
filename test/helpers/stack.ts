@@ -235,6 +235,12 @@ export class Mcp {
     try { data = JSON.parse(text); } catch { /* keep text */ }
     return { isError: !!r.isError, data, text };
   }
+  /** The full content list of a tool result (call() only parses the first item). */
+  async callContent(name: string, args: Record<string, unknown> = {}): Promise<{ isError: boolean; content: any[] }> {
+    if (!this.connected) await this.connect();
+    const r: any = await this.client.callTool({ name, arguments: args });
+    return { isError: !!r.isError, content: r.content ?? [] };
+  }
   async close() {
     await this.client.close().catch(() => {});
   }

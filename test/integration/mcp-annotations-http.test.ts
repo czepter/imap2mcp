@@ -8,8 +8,8 @@ import { makeSelfSignedCert } from "../helpers/certs.js";
 import { createStack, Mcp, obtainToken, type Stack } from "../helpers/stack.js";
 
 const haveOpenssl = !!makeSelfSignedCert();
-const TOOLS = ["create_draft", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"];
-const READ_ONLY = new Set(["list_mailboxes", "list_folders", "search_messages", "read_message"]);
+const TOOLS = ["create_draft", "get_attachment", "list_folders", "list_mailboxes", "move_message", "read_message", "search_messages", "set_flags"];
+const READ_ONLY = new Set(["list_mailboxes", "list_folders", "search_messages", "read_message", "get_attachment"]);
 
 describe.skipIf(!haveOpenssl)("tools/list over HTTP", () => {
   let s: Stack;
@@ -22,7 +22,7 @@ describe.skipIf(!haveOpenssl)("tools/list over HTTP", () => {
   });
   afterAll(async () => { await mcp?.close(); await s?.teardown(); });
 
-  it("lists exactly the seven tools, each with a title and explicit annotations", async () => {
+  it("lists exactly the eight tools, each with a title and explicit annotations", async () => {
     const tools = await mcp.toolDefs();
     expect(tools.map((t) => t.name).sort()).toEqual(TOOLS);
     for (const t of tools) {
@@ -48,7 +48,7 @@ describe.skipIf(!haveOpenssl)("tools/list over HTTP", () => {
 
   it("titles are distinct and human readable (not just the snake_case name)", async () => {
     const titles = (await mcp.toolDefs()).map((t) => t.title!);
-    expect(new Set(titles).size).toBe(7);
+    expect(new Set(titles).size).toBe(8);
     for (const t of titles) expect(t).not.toMatch(/_/);
   });
 });

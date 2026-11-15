@@ -52,12 +52,13 @@ Grants (what a client may do) are separate from token lifetime: grant changes in
 | `list_mailboxes` | none |
 | `list_folders` | `mailbox` |
 | `search_messages` | `mailbox`, `folder`; optional `text`, `from`, `to`, `subject`, `since`, `before` (`YYYY-MM-DD`), `unseen`, `flagged`, `limit` (1-50), `cursor` |
-| `read_message` | `ref`; optional `include` (`["headers"]`, `["body"]` or both) |
+| `read_message` | `ref`; optional `include` (`["headers"]`, `["body"]` or both). With the body, `attachments` lists `part`, `filename`, `contentType`, approximate `size` |
+| `get_attachment` | `ref`, `part` (from `read_message` attachments). Returns metadata, then the file: images inline, text types as text, other types (PDF, Office) as a base64 resource. Max 10 MB |
 | `create_draft` | `mailbox`, `subject`, `body`; optional `to[]`, `cc[]`, `inReplyTo` |
 | `move_message` | `ref`, `destination` |
 | `set_flags` | `refs[]` (1-25), optional `add[]`, `remove[]` |
 
-`mailbox` is the id from `list_mailboxes`. `ref` is `{mailbox, folder, uidValidity, uid}` as returned by earlier calls. Limits: 50 per page, 25 per batch, 200 KB body. Errors are `{code, message, requestId, retryable, operatorAction?}`; see `docs/ERRORS.md` for all codes.
+`mailbox` is the id from `list_mailboxes`. `ref` is `{mailbox, folder, uidValidity, uid}` as returned by earlier calls. Limits: 50 per page, 25 per batch, 200 KB body, 10 MB per attachment. Errors are `{code, message, requestId, retryable, operatorAction?}`; see `docs/ERRORS.md` for all codes.
 
 ## Trying it with curl
 

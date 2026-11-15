@@ -1,7 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import { withImap } from "../imap/client.js";
 import { ToolError } from "./errors.js";
-import type { Addr, BodyResult, Criteria, Header, PageResult, ReadBackend } from "./backend.js";
+import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, Criteria, Header, PageResult, ReadBackend } from "./backend.js";
 
 /** v0 direct IMAP read path. Debug only (SIDECAR_DISABLED=1); same interface and semantics as the sidecar backend. */
 
@@ -56,11 +56,32 @@ async function fetchHeaderRows(c: ImapFlow, uids: number[], uidValidity: number)
 }
 
 interface Node {
-  part?: string; type?: string; parameters?: Record<string, string>; disposition?: string; childNodes?: Node[];
+  part?: string; type?: string; parameters?: Record<string, string>; disposition?: string;
+  dispositionParameters?: Record<string, string>; id?: string; encoding?: string; size?: number; childNodes?: Node[];
 }
+/** Leaf parts; a forwarded message (message/rfc822) is one leaf, its own parts are not descended into. */
 function leavesOf(n: Node, out: Node[] = []): Node[] {
-  if (n.childNodes?.length) n.childNodes.forEach((x) => leavesOf(x, out)); else out.push(n);
+  if (n.childNodes?.length && n.type?.toLowerCase() !== "message/rfc822") n.childNodes.forEach((x) => leavesOf(x, out)); else out.push(n);
   return out;
+}
+
+const partOf = (n: Node) => n.part || "1";
+const filenameOf = (n: Node) => n.dispositionParameters?.filename || n.parameters?.name || "";
+
+/** Same rule as the sidecar: marked as attachment, has a file name, or is neither text/plain nor text/html. */
+function isAttachment(n: Node): boolean {
+  if (n.disposition?.toLowerCase() === "attachment" || filenameOf(n)) return true;
+  const t = (n.type ?? "text/plain").toLowerCase();
+  return t !== "text/plain" && t !== "text/html";
+}
+
+function attachmentInfo(n: Node): AttachmentInfo {
+  const size = Number(n.size ?? 0);
+  return {
+    part: partOf(n), filename: filenameOf(n) || null, contentType: (n.type ?? "application/octet-stream").toLowerCase(),
+    disposition: n.disposition?.toLowerCase() || null, contentId: n.id ? n.id.replace(/^<|>$/g, "") : null,
+    size: n.encoding?.toLowerCase() === "base64" ? Math.floor(((size * 76) / 78) * 3 / 4) : size,
+  };
 }
 
 export const directBackend: ReadBackend = {
@@ -102,14 +123,14 @@ export const directBackend: ReadBackend = {
       const m = await c.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
       if (!m) throw new ToolError("NOT_FOUND", "Message not found");
       const leaves = leavesOf((m.bodyStructure ?? {}) as Node);
-      const isAtt = (n: Node) => n.disposition?.toLowerCase() === "attachment";
-      const plain = leaves.find((n) => n.type === "text/plain" && !isAtt(n));
-      const html = leaves.find((n) => n.type === "text/html" && !isAtt(n));
+      const attachments = leaves.filter(isAttachment).map(attachmentInfo);
+      const plain = leaves.find((n) => n.type === "text/plain" && !isAttachment(n));
+      const html = leaves.find((n) => n.type === "text/html" && !isAttachment(n));
       const chosen = plain ?? html ?? (leaves.length === 1 && (leaves[0].type ?? "text/plain").startsWith("text/") ? leaves[0] : undefined);
-      if (!chosen) return { truncated: false };
+      if (!chosen) return { truncated: false, attachments };
       // download() uses BODY.PEEK, so \Seen is not set.
       const dl = await c.download(String(uid), chosen.part || "1", { uid: true, maxBytes: maxBytes + 1 });
-      if (!dl.content) return { truncated: false }; // imapflow 2: no content stream for this part (nothing readable)
+      if (!dl.content) return { truncated: false, attachments }; // imapflow 2: no content stream for this part (nothing readable)
       const chunks: Buffer[] = [];
       let len = 0;
       for await (const chunk of dl.content) {
@@ -122,7 +143,29 @@ export const directBackend: ReadBackend = {
       if (buf.length > maxBytes) { buf = buf.subarray(0, maxBytes); truncated = true; }
       let s: string;
       try { s = new TextDecoder(chosen.parameters?.charset || "utf-8").decode(buf); } catch { s = new TextDecoder("utf-8").decode(buf); }
-      return chosen === html && !plain ? { html: s, truncated } : { text: s, truncated };
+      return chosen === html && !plain ? { html: s, truncated, attachments } : { text: s, truncated, attachments };
+    }));
+  },
+
+  async fetchAttachment(mailbox, folder, uidValidity, uid, part, maxBytes): Promise<AttachmentResult> {
+    return withImap(mailbox, (c) => withFolder(c, folder, async () => {
+      if (uidValidityOf(c) !== uidValidity) throw new ToolError("STALE_REFERENCE", "Message reference is stale (UIDVALIDITY changed); search again.");
+      const m = await c.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
+      if (!m) throw new ToolError("NOT_FOUND", "Message not found");
+      const node = leavesOf((m.bodyStructure ?? {}) as Node).find((n) => isAttachment(n) && partOf(n) === part);
+      if (!node) return { found: false };
+      const attachment = attachmentInfo(node);
+      // download() uses BODY.PEEK and undoes the transfer encoding.
+      const dl = await c.download(String(uid), part, { uid: true, maxBytes: maxBytes + 1 });
+      const chunks: Buffer[] = [];
+      let len = 0;
+      for await (const chunk of dl.content ?? []) {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        chunks.push(b); len += b.length;
+        if (len > maxBytes) return { found: true, attachment, tooLarge: true };
+      }
+      const data = Buffer.concat(chunks);
+      return { found: true, attachment: { ...attachment, size: data.length }, tooLarge: false, data };
     }));
   },
 };

@@ -20,7 +20,14 @@ export interface Criteria {
 }
 
 export interface PageResult { uidValidity: number; items: Header[]; nextBeforeUid?: number }
-export interface BodyResult { text?: string; html?: string; truncated: boolean }
+/** One attachment of a message. `part` is the IMAP section number (e.g. "2" or "1.2"); `size` is approximate. */
+export interface AttachmentInfo {
+  part: string; filename: string | null; contentType: string; disposition: string | null; contentId: string | null; size: number;
+}
+export interface BodyResult { text?: string; html?: string; truncated: boolean; attachments: AttachmentInfo[] }
+
+/** A fetched attachment. `data` is absent when the part is no attachment of the message (`found: false`) or too large. */
+export interface AttachmentResult { found: boolean; attachment?: AttachmentInfo; tooLarge?: boolean; data?: Buffer }
 
 /**
  * Read-only IMAP operations. Implementations perform NO authorization: callers (server/core/mcp/tools.ts)
@@ -32,6 +39,8 @@ export interface ReadBackend {
   searchText(mailbox: string, folder: string, text: string, limit: number): Promise<{ uidValidity: number; uids: number[] }>;
   fetchHeaders(mailbox: string, folder: string, uidValidity: number, uids: number[]): Promise<Header[]>;
   fetchBody(mailbox: string, folder: string, uidValidity: number, uid: number, maxBytes: number): Promise<BodyResult>;
+  /** Fetch one attachment part (decoded, BODY.PEEK). Only parts listed in BodyResult.attachments can be fetched. */
+  fetchAttachment(mailbox: string, folder: string, uidValidity: number, uid: number, part: string, maxBytes: number): Promise<AttachmentResult>;
 }
 
 const reliableSidecar = reliableBackend(sidecarBackend);

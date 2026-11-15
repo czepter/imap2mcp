@@ -68,6 +68,6 @@ export function reliableBackend(inner: ReadBackend, cachedMethods: Set<string> =
     }) as ReadBackend[K];
   return {
     listFolders: wrap("listFolders"), search: wrap("search"), searchText: wrap("searchText"),
-    fetchHeaders: wrap("fetchHeaders"), fetchBody: wrap("fetchBody"),
+    fetchHeaders: wrap("fetchHeaders"), fetchBody: wrap("fetchBody"), fetchAttachment: wrap("fetchAttachment"),
   };
 }
