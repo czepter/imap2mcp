@@ -56,8 +56,8 @@ func upstream(cr imapx.Creds, err error) error {
 	if errors.Is(err, imapx.ErrAuth) {
 		return errAuthFailed()
 	}
-	if errors.Is(err, imapx.ErrLoginRefused) {
-		return errf(CodeUpstream, "%s", imapx.ErrLoginRefused.Error())
+	if errors.Is(err, imapx.ErrLoginRefused) || errors.Is(err, imapx.ErrLoginDeferred) {
+		return errf(CodeUpstream, "%s", err.Error()) // wording and code are safe by construction
 	}
 	if isTimeout(err) {
 		return errf(CodeTimeout, "upstream request timed out")
@@ -94,7 +94,7 @@ func ErrorCode(err error) string {
 		return ""
 	case errors.Is(err, imapx.ErrAuth):
 		return "AUTH_FAILED"
-	case errors.Is(err, imapx.ErrLoginRefused):
+	case errors.Is(err, imapx.ErrLoginRefused), errors.Is(err, imapx.ErrLoginDeferred):
 		return "LOGIN_REFUSED"
 	case errors.Is(err, context.DeadlineExceeded) || isTimeout(err):
 		return "TIMEOUT"

@@ -171,6 +171,9 @@ type Account struct {
 	guard    *AuthGuard // latch + strike policy; may be shared across Account replacements
 	authSeen bool       // onAuth already fired for the current latch
 	onAuth   func()     // called (once per latch) when the guard latches
+	logf     func(format string, args ...any) // never receives credentials
+	noID     bool                              // do not send the IMAP ID command before login
+	okLogged bool                              // the first successful login was logged
 }
 
 type conn struct {
@@ -192,6 +195,22 @@ func NewAccountWithGuard(creds Creds, tlsCfg func(serverName string) *tls.Config
 		g = NewAuthGuard(0, 0, nil)
 	}
 	return &Account{creds: creds, tlsCfg: tlsCfg, guard: g}
+}
+
+// SetLogf installs the logger used for login failures. Lines carry the
+// server's reply text, redacted of user and password.
+func (a *Account) SetLogf(f func(format string, args ...any)) {
+	a.mu.Lock()
+	a.logf = f
+	a.mu.Unlock()
+}
+
+// SetSendID switches the IMAP ID command (RFC 2971) sent before login on or
+// off. It is on by default and only sent when the server advertises ID.
+func (a *Account) SetSendID(on bool) {
+	a.mu.Lock()
+	a.noID = !on
+	a.mu.Unlock()
 }
 
 // Creds returns the account credentials (in-memory copy).
@@ -311,7 +330,11 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 		_ = raw.Close()
 		return nil, fmt.Errorf("tls: %w", err)
 	}
-	cl := imapclient.New(tc, &imapclient.Options{
+	di := &dialInfo{sni: sn, remote: net.JoinHostPort(cr.IP, strconv.Itoa(port))}
+	st := tc.ConnectionState()
+	di.tls, di.cipher = tls.VersionName(st.Version), tls.CipherSuiteName(st.CipherSuite)
+	gc := &greetConn{Conn: tc}
+	cl := imapclient.New(gc, &imapclient.Options{
 		WordDecoder:           &mime.WordDecoder{CharsetReader: charset.Reader},
 		UnilateralDataHandler: h,
 	})
@@ -324,21 +347,32 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 		}
 		return nil, err
 	}
-	if err := authenticate(cl, cr); err != nil {
+	di.greeting = gc.line()
+	a.sendID(cl, cr, di)
+	method, err := authenticate(cl, cr)
+	if err != nil {
 		closeAsync(cl)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if isAuthRejection(err) {
-			if a.guard.reject() {
+		rejection := isAuthRejection(err)
+		var strike int
+		var latched bool
+		if rejection {
+			strike, latched = a.guard.rejectN()
+		}
+		a.logLoginFailure(cr, method, err, rejection, strike, latched, di)
+		if rejection {
+			if latched {
 				a.latchAuth()
 				return nil, ErrAuth
 			}
-			return nil, ErrLoginRefused
+			return nil, newLoginRefused(err)
 		}
 		return nil, err
 	}
 	a.guard.ok()
+	a.logFirstSuccess(cr, method, di)
 	return cl, nil
 }
 
@@ -346,11 +380,30 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 // providers refuse the LOGIN command for credentials AUTHENTICATE accepts), and
 // with LOGIN otherwise. Exactly one attempt is made: a refused AUTHENTICATE is
 // not retried as LOGIN. Caps asks the server when the greeting carried none.
-func authenticate(cl *imapclient.Client, cr Creds) error {
+func authenticate(cl *imapclient.Client, cr Creds) (string, error) {
 	if cl.Caps().Has(imap.AuthCap("PLAIN")) {
-		return cl.Authenticate(sasl.NewPlainClient("", cr.User, cr.Pass))
+		return "AUTHENTICATE PLAIN", cl.Authenticate(sasl.NewPlainClient("", cr.User, cr.Pass))
 	}
-	return cl.Login(cr.User, cr.Pass).Wait()
+	return "LOGIN", cl.Login(cr.User, cr.Pass).Wait()
+}
+
+// logLoginFailure writes one line with the server's reply to a failed login.
+// Every string passes through Redact; the password and user name never appear.
+func (a *Account) logLoginFailure(cr Creds, method string, err error, rejection bool, strike int, latched bool, di *dialInfo) {
+	a.mu.Lock()
+	logf := a.logf
+	a.mu.Unlock()
+	if logf == nil {
+		return
+	}
+	var ie *imap.Error
+	if errors.As(err, &ie) {
+		logf("imap login rejected host=%s method=%q status=%s code=%q text=%q auth_rejection=%t strike=%d/%d latched=%t %s",
+			cr.Host, method, cr.Redact(string(ie.Type)), cr.Redact(string(ie.Code)), cr.Redact(ie.Text),
+			rejection, strike, a.guard.strikes, latched, di.describe(cr))
+		return
+	}
+	logf("imap login error host=%s method=%q error=%q auth_rejection=%t %s", cr.Host, method, cr.Redact(err.Error()), rejection, di.describe(cr))
 }
 
 func (a *Account) acquire(ctx context.Context) (*conn, bool, error) {
@@ -769,4 +822,92 @@ func (a *Account) FetchPart(ctx context.Context, folder string, uid uint32, part
 		return RawPart{}, err
 	}
 	return rp, nil
+}
+
+// clientID is what the sidecar tells servers about itself: nothing about the
+// user, the mailbox or the host it connects to.
+var clientID = &imap.IDData{Name: "imap2mcp", Version: "1", Vendor: "imap2mcp"}
+
+// dialInfo collects what is worth knowing about one connection attempt when a
+// login is refused.
+type dialInfo struct {
+	tls, cipher, sni, remote string
+	idSent                   bool
+	serverID                 string
+	greeting                 string
+}
+
+func (d *dialInfo) describe(cr Creds) string {
+	return fmt.Sprintf("tls=%s cipher=%s sni=%s remote=%s id_sent=%t server_id=%q greeting=%q",
+		d.tls, d.cipher, d.sni, d.remote, d.idSent, cr.Redact(d.serverID), cr.Redact(d.greeting))
+}
+
+// sendID sends the IMAP ID command before login when the server advertises it
+// (some providers treat anonymous clients from data centres with suspicion).
+// A failure is logged and never blocks the login.
+func (a *Account) sendID(cl *imapclient.Client, cr Creds, di *dialInfo) {
+	a.mu.Lock()
+	off, logf := a.noID, a.logf
+	a.mu.Unlock()
+	if off || !cl.Caps().Has(imap.CapID) {
+		return
+	}
+	di.idSent = true
+	got, err := cl.ID(clientID).Wait()
+	if err != nil {
+		if logf != nil {
+			logf("imap ID failed host=%s error=%q", cr.Host, cr.Redact(err.Error()))
+		}
+		return
+	}
+	if got != nil {
+		di.serverID = fmt.Sprintf("name=%s vendor=%s version=%s", got.Name, got.Vendor, got.Version)
+	}
+}
+
+// logFirstSuccess logs once per Account what a working login looked like.
+func (a *Account) logFirstSuccess(cr Creds, method string, di *dialInfo) {
+	a.mu.Lock()
+	logf, done := a.logf, a.okLogged
+	a.okLogged = true
+	a.mu.Unlock()
+	if logf == nil || done {
+		return
+	}
+	logf("imap login ok host=%s method=%q tls=%s id_sent=%t server_id=%q", cr.Host, method, di.tls, di.idSent, cr.Redact(di.serverID))
+}
+
+// greetConn remembers the server's first line (the greeting), which the IMAP
+// client does not expose.
+type greetConn struct {
+	net.Conn
+	mu   sync.Mutex
+	buf  []byte
+	done bool
+}
+
+func (g *greetConn) Read(p []byte) (int, error) {
+	n, err := g.Conn.Read(p)
+	g.mu.Lock()
+	if !g.done && n > 0 {
+		g.buf = append(g.buf, p[:n]...)
+		if i := strings.IndexByte(string(g.buf), '\n'); i >= 0 || len(g.buf) > 512 {
+			g.done = true
+		}
+	}
+	g.mu.Unlock()
+	return n, err
+}
+
+func (g *greetConn) line() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	l := string(g.buf)
+	if i := strings.IndexByte(l, '\n'); i >= 0 {
+		l = l[:i]
+	}
+	if len(l) > 300 {
+		l = l[:300]
+	}
+	return strings.TrimSpace(l)
 }

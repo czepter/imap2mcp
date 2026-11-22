@@ -2,8 +2,11 @@ package imapx
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/emersion/go-imap/v2"
 )
 
 // ErrLoginRefused is returned when the server refused a login but the refusal
@@ -11,6 +14,38 @@ import (
 // after such a refusal). The message deliberately avoids the words the Node
 // layer treats as an authentication failure.
 var ErrLoginRefused = errors.New("mail server refused the login; will retry later")
+
+// ErrLoginDeferred is returned during the cooldown that follows a refusal: the
+// server was not contacted. Same wording rules as ErrLoginRefused.
+var ErrLoginDeferred = errors.New("login paused after a recent refusal by the mail server; will retry later")
+
+// loginRefused is ErrLoginRefused plus, when safe, the server's response code.
+type loginRefused struct{ code string }
+
+func (e *loginRefused) Error() string {
+	if e.code == "" {
+		return ErrLoginRefused.Error()
+	}
+	return ErrLoginRefused.Error() + " (server code: " + e.code + ")"
+}
+
+func (e *loginRefused) Is(target error) bool { return target == ErrLoginRefused }
+
+// safeCodes are response codes that may be echoed in the RPC error message.
+// The Node layer matches the message against patterns such as "nonexist" and
+// "over quota"; only codes verified not to trip any of them are listed.
+var safeCodes = map[string]bool{
+	"AUTHENTICATIONFAILED": true, "AUTHORIZATIONFAILED": true, "EXPIRED": true,
+	"PRIVACYREQUIRED": true, "CONTACTADMIN": true,
+}
+
+func newLoginRefused(err error) error {
+	var ie *imap.Error
+	if errors.As(err, &ie) && safeCodes[strings.ToUpper(string(ie.Code))] {
+		return &loginRefused{code: strings.ToUpper(string(ie.Code))}
+	}
+	return ErrLoginRefused
+}
 
 const (
 	DefaultAuthStrikes  = 3
@@ -71,7 +106,7 @@ func (g *AuthGuard) admit() error {
 		return ErrAuth
 	}
 	if !g.notBefore.IsZero() && g.now().Before(g.notBefore) {
-		return ErrLoginRefused
+		return ErrLoginDeferred
 	}
 	return nil
 }
@@ -81,18 +116,24 @@ func (g *AuthGuard) admit() error {
 // parallel before it (watchers and tool calls reconnecting together), so a
 // burst counts as one strike.
 func (g *AuthGuard) reject() bool {
+	_, latched := g.rejectN()
+	return latched
+}
+
+// rejectN is reject that also reports the strike count after the call.
+func (g *AuthGuard) rejectN() (int, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.latched {
-		return true
+		return g.count, true
 	}
 	if !g.notBefore.IsZero() && g.now().Before(g.notBefore) {
-		return false
+		return g.count, false
 	}
 	g.count++
 	if g.count >= g.strikes {
 		g.latched = true
-		return true
+		return g.count, true
 	}
 	d := g.cooldown
 	for i := 1; i < g.count && d < maxAuthCooldown; i++ {
@@ -102,7 +143,7 @@ func (g *AuthGuard) reject() bool {
 		d = maxAuthCooldown
 	}
 	g.notBefore = g.now().Add(d)
-	return false
+	return g.count, false
 }
 
 // ok records a successful login.

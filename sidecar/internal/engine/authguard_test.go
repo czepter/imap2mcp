@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -42,7 +43,7 @@ func TestTransientLoginRefusalDoesNotLatchUntilConfirmed(t *testing.T) {
 		t.Helper()
 		assertCode(t, err, engine.CodeUpstream)
 		m := strings.ToLower(err.Error())
-		if !strings.Contains(m, "refused the login") || strings.Contains(m, "authentication failed") || strings.Contains(m, "login failed") || strings.Contains(m, "invalid credentials") {
+		if !(strings.Contains(m, "refused the login") || strings.Contains(m, "paused after a recent refusal")) || strings.Contains(m, "authentication failed") || strings.Contains(m, "login failed") || strings.Contains(m, "invalid credentials") {
 			t.Fatalf("unexpected message %q", err)
 		}
 	}
@@ -202,5 +203,61 @@ func TestRefusedAuthenticateCountsOneStrikeWithoutLoginFallback(t *testing.T) {
 	assertCode(t, e.Open(ctx(), "mb1", creds(srv)), engine.CodeUpstream)
 	if srv.AuthAttempts() != 1 || srv.LoginCommands() != 0 || srv.LoginFailures() != 1 {
 		t.Fatalf("auth %d, login cmds %d, failures %d", srv.AuthAttempts(), srv.LoginCommands(), srv.LoginFailures())
+	}
+}
+
+func TestRefusedLoginIsLoggedWithServerReplyAndCooldownIsDeferred(t *testing.T) {
+	srv := testimap.New(t)
+	var mu sync.Mutex
+	var lines []string
+	e, clk := func() (*engine.Engine, *fakeClock) {
+		clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+		return newEngine(t, srv, func(o *engine.Options) {
+			o.AuthStrikes = 3
+			o.AuthCooldown = 30 * time.Second
+			o.Now = clk.Now
+			o.Logf = func(f string, a ...any) {
+				mu.Lock()
+				lines = append(lines, fmt.Sprintf(f, a...))
+				mu.Unlock()
+			}
+		}), clk
+	}()
+	srv.SetRejectLogin(true)
+	logs := func() string { mu.Lock(); defer mu.Unlock(); return strings.Join(lines, "\n") }
+
+	err := e.Open(ctx(), "mb1", creds(srv))
+	assertCode(t, err, engine.CodeUpstream)
+	if !strings.Contains(err.Error(), "refused the login") || !strings.Contains(err.Error(), "(server code: AUTHENTICATIONFAILED)") {
+		t.Fatalf("refusal message %q", err)
+	}
+	out := logs()
+	for _, want := range []string{
+		"mailbox=mb1", "host=mail.example.test", `method="AUTHENTICATE PLAIN"`, "status=NO",
+		`code="AUTHENTICATIONFAILED"`, "text=", "auth_rejection=true", "strike=1/3", "latched=false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log lacks %q:\n%s", want, out)
+		}
+	}
+	t.Logf("log line: %s", out)
+	if strings.Contains(out, testimap.Pass) || strings.Contains(out, testimap.User) {
+		t.Fatalf("log leaks credentials:\n%s", out)
+	}
+
+	clk.Advance(10 * time.Second)
+	n := srv.Logins()
+	err = e.Open(ctx(), "mb1", creds(srv))
+	assertCode(t, err, engine.CodeUpstream)
+	if !strings.Contains(err.Error(), "paused after a recent refusal") || strings.Contains(err.Error(), "refused the login") {
+		t.Fatalf("cooldown message %q", err)
+	}
+	if srv.Logins() != n {
+		t.Fatal("server contacted during cooldown")
+	}
+	for _, raw := range []error{imapx.ErrLoginDeferred, imapx.ErrLoginRefused} {
+		if got := engine.ErrorCode(raw); got != "LOGIN_REFUSED" {
+			t.Fatalf("code %s for %v", got, raw)
+		}
 	}
 }

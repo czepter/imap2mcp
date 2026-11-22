@@ -41,6 +41,15 @@ func envMillis(name string, def time.Duration) time.Duration {
 	return def
 }
 
+// envOff reports whether a default-on switch is set to 0/false/off/no.
+func envOff(name string) bool {
+	switch strings.ToLower(os.Getenv(name)) {
+	case "0", "false", "off", "no":
+		return true
+	}
+	return false
+}
+
 func envInt(name string, def int) int {
 	if v := os.Getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -104,6 +113,7 @@ func main() {
 		HealthyReset:     envMillis("RECONNECT_HEALTHY_MS", 30*time.Second),
 		AuthStrikes:      envInt("AUTH_STRIKES", 3),
 		AuthCooldown:     envMillis("AUTH_COOLDOWN_MS", 30*time.Second),
+		DisableID:        envOff("IMAP_SEND_ID"),
 	})
 	srv, err := rpc.New(rpc.Config{Socket: path, Secret: secret, Logf: logger.Printf}, eng)
 	if err != nil {
