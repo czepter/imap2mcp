@@ -381,8 +381,16 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 // with LOGIN otherwise. Exactly one attempt is made: a refused AUTHENTICATE is
 // not retried as LOGIN. Caps asks the server when the greeting carried none.
 func authenticate(cl *imapclient.Client, cr Creds) (string, error) {
-	if cl.Caps().Has(imap.AuthCap("PLAIN")) {
-		return "AUTHENTICATE PLAIN", cl.Authenticate(sasl.NewPlainClient("", cr.User, cr.Pass))
+	caps := cl.Caps()
+	if caps.Has(imap.AuthCap("PLAIN")) {
+		// go-imap puts the PLAIN initial response inline whenever SASL-IR is
+		// advertised. Dropping SASL-IR from the client's cached capabilities
+		// (Caps returns the live map; nothing else is in flight before login)
+		// makes it send "AUTHENTICATE PLAIN", wait for the "+" continuation and
+		// answer it, the exchange imapflow uses and web.de accepts from the
+		// production host.
+		delete(caps, imap.CapSASLIR)
+		return "AUTHENTICATE PLAIN (no SASL-IR)", cl.Authenticate(sasl.NewPlainClient("", cr.User, cr.Pass))
 	}
 	return "LOGIN", cl.Login(cr.User, cr.Pass).Wait()
 }

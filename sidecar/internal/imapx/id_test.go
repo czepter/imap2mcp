@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"fmt"
 	"math/big"
 	"net"
@@ -22,10 +23,13 @@ import (
 // refuses every login. The go-imap server does not implement ID, so this one
 // records the commands it sees.
 type rawServer struct {
-	ln   net.Listener
-	pool *x509.CertPool
-	mu   sync.Mutex
-	cmds []string
+	ln    net.Listener
+	pool  *x509.CertPool
+	mu    sync.Mutex
+	cmds  []string
+	lines []string
+	resp  []string
+	okAll bool
 }
 
 func newRawServer(t *testing.T, caps string) *rawServer {
@@ -78,13 +82,22 @@ func (s *rawServer) serve(c net.Conn, caps string) {
 		tag, cmd := f[0], strings.ToUpper(f[1])
 		s.mu.Lock()
 		s.cmds = append(s.cmds, cmd)
+		s.lines = append(s.lines, strings.TrimRight(line, "\r\n"))
 		s.mu.Unlock()
 		switch cmd {
 		case "ID":
 			fmt.Fprintf(c, "* ID (\"name\" \"FakeSrv\" \"vendor\" \"Fake Inc\" \"version\" \"9.1\")\r\n%s OK ID done\r\n", tag)
 		case "AUTHENTICATE":
 			fmt.Fprintf(c, "+ \r\n")
-			_, _ = r.ReadString('\n')
+			resp, _ := r.ReadString('\n')
+			s.mu.Lock()
+			s.resp = append(s.resp, strings.TrimRight(resp, "\r\n"))
+			ok := s.okAll
+			s.mu.Unlock()
+			if ok {
+				fmt.Fprintf(c, "%s OK authenticated\r\n", tag)
+				continue
+			}
 			fmt.Fprintf(c, "%s NO [AUTHENTICATIONFAILED] Login denied for fake reasons\r\n", tag)
 		case "LOGIN":
 			fmt.Fprintf(c, "%s NO [AUTHENTICATIONFAILED] Login denied for fake reasons\r\n", tag)
@@ -128,7 +141,7 @@ func TestIDSentBeforeAuthenticateAndLoggedOnRefusal(t *testing.T) {
 		t.Fatalf("command order %v", cmds)
 	}
 	for _, want := range []string{
-		`method="AUTHENTICATE PLAIN"`, `code="AUTHENTICATIONFAILED"`, `text="Login denied for fake reasons"`, "id_sent=true",
+		`method="AUTHENTICATE PLAIN (no SASL-IR)"`, `code="AUTHENTICATIONFAILED"`, `text="Login denied for fake reasons"`, "id_sent=true",
 		`server_id="name=FakeSrv vendor=Fake Inc version=9.1"`, "sni=mail.example.test", "remote=127.0.0.1:", "tls=TLS 1.3", "cipher=TLS_",
 		"Fake greeting ready", "strike=1/3",
 	} {
@@ -152,5 +165,27 @@ func TestIDNotSentWhenDisabledOrNotAdvertised(t *testing.T) {
 	_, _ = dialRaw(t, s2, true)
 	if c := s2.commands(); len(c) != 1 || c[0] != "AUTHENTICATE" {
 		t.Fatalf("not advertised: %v", c)
+	}
+}
+
+func TestPlainSentWithoutInitialResponseAndAnsweredOnContinuation(t *testing.T) {
+	s := newRawServer(t, "ID AUTH=PLAIN SASL-IR")
+	s.okAll = true
+	out, err := dialRaw(t, s, false)
+	if err != nil {
+		t.Fatalf("login failed: %v\n%s", err, out)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.lines) == 0 {
+		t.Fatal("no command seen")
+	}
+	f := strings.Fields(s.lines[0])
+	if len(f) != 3 || f[1] != "AUTHENTICATE" || f[2] != "PLAIN" {
+		t.Fatalf("AUTHENTICATE line must carry no inline response, got %q", s.lines[0])
+	}
+	want := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00s3cret-pass"))
+	if len(s.resp) != 1 || s.resp[0] != want {
+		t.Fatalf("continuation response %q, want %q", s.resp, want)
 	}
 }
