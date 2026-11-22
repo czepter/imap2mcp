@@ -161,3 +161,20 @@ describe("log redaction", () => {
     expect(() => redact(a)).not.toThrow();
   });
 });
+
+describe("sidecar login refusal messages", () => {
+  const msgs = [
+    "mail server refused the login; will retry later",
+    "mail server refused the login; will retry later (server code: AUTHENTICATIONFAILED)",
+    "mail server refused the login; will retry later (server code: AUTHORIZATIONFAILED)",
+    "mail server refused the login; will retry later (server code: EXPIRED)",
+    "mail server refused the login; will retry later (server code: PRIVACYREQUIRED)",
+    "mail server refused the login; will retry later (server code: CONTACTADMIN)",
+    "login paused after a recent refusal by the mail server; will retry later",
+  ];
+  it("never maps to AUTH_FAILED (only the sidecar's own latch message does)", () => {
+    for (const m of msgs) {
+      expect(normalizeError(new SidecarRpcError(RPC_UPSTREAM, m)).code, m).toBe("UPSTREAM_ERROR");
+    }
+  });
+});

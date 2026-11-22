@@ -15,7 +15,7 @@ func TestAuthGuardStrikesCooldownAndReset(t *testing.T) {
 	if g.reject() {
 		t.Fatal("latched on strike 1")
 	}
-	if !errors.Is(g.admit(), ErrLoginRefused) {
+	if !errors.Is(g.admit(), ErrLoginDeferred) {
 		t.Fatal("no cooldown after strike 1")
 	}
 	now = now.Add(31 * time.Second)
@@ -59,5 +59,15 @@ func TestAuthGuardBurstCountsOnce(t *testing.T) {
 	now = now.Add(3 * time.Minute)
 	if !g.reject() {
 		t.Fatal("third spaced strike must latch")
+	}
+}
+
+func TestDeferredAndRefusedAreDistinct(t *testing.T) {
+	if errors.Is(ErrLoginDeferred, ErrLoginRefused) || errors.Is(ErrLoginRefused, ErrLoginDeferred) {
+		t.Fatal("sentinels must differ")
+	}
+	e := &loginRefused{code: "AUTHENTICATIONFAILED"}
+	if !errors.Is(e, ErrLoginRefused) {
+		t.Fatal("coded refusal must match ErrLoginRefused")
 	}
 }

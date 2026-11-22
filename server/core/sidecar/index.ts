@@ -19,7 +19,7 @@ export const SIDECAR_ENV_KNOBS = [
   "SYNC_RECONCILE_SECS", "SIDECAR_AUTOSYNC_SECS",
   "IDLE_RENEW_SECS", "IDLE_POLL_SECS", "SIDECAR_FOLDER_IDLE_SECS",
   "RECONNECT_INITIAL_MS", "RECONNECT_MAX_MS", "RECONNECT_HEALTHY_MS", // tests only
-  "AUTH_STRIKES", "AUTH_COOLDOWN_MS",
+  "AUTH_STRIKES", "AUTH_COOLDOWN_MS", "IMAP_SEND_ID",
 ] as const;
 
 export function sidecarEnabled(): boolean { return !config.sidecarDisabled; }
