@@ -273,16 +273,19 @@ describe.skipIf(!haveOpenssl)("TLS validation and SSRF policy on mailbox connect
   it("SSRF: a host resolving to a private/loopback address is refused unless listed in ALLOW_PRIVATE_HOSTS", async () => {
     const s = await createStack({ accounts: [ALICE], skipMailboxes: true, env: { ALLOW_PRIVATE_HOSTS: "" } });
     try {
+      const ids: string[] = [];
       for (const host of ["localhost", "127.0.0.1", "169.254.169.254", "10.0.0.5", "[::1]"]) {
         const id = await addMailboxRaw(s, { label: host, host, port: s.fake.port, user: ALICE, pass: s.imapPasswords[ALICE] });
         const t = await testMailbox(s, id);
         expect(t.ok, host).toBe(false);
         expect(t.message, host).toMatch(/ALLOW_PRIVATE_HOSTS|private/i);
-        const { tokens } = await obtainToken(s, [[id, "read"]]);
-        const mcp = await new Mcp(s.base, tokens.access_token).connect();
-        expect((await mcp.call("list_folders", { mailbox: id })).isError, host).toBe(true);
-        await mcp.close();
+        ids.push(id);
       }
+      // the tool path enforces the same check (one token covering every refused mailbox)
+      const { tokens } = await obtainToken(s, ids.map((id): [string, "read"] => [id, "read"]));
+      const mcp = await new Mcp(s.base, tokens.access_token).connect();
+      for (const id of ids) expect((await mcp.call("list_folders", { mailbox: id })).isError, id).toBe(true);
+      await mcp.close();
       expect(s.fake.commands.filter((c) => c.line.includes("LOGIN-ATTEMPT"))).toHaveLength(0);
     } finally { await s.teardown(); }
   });
