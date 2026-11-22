@@ -18,7 +18,7 @@ export const ALICE = "alice@example.test";
 export const BOB = "bob@example.test";
 
 /** Scaled timers so recovery tests run in seconds instead of minutes (documented test-only knobs, DESIGN_V2). */
-export const FAST_ENV = { RECONNECT_INITIAL_MS: "200", RECONNECT_MAX_MS: "2000", SYNC_RECONCILE_SECS: "600" };
+export const FAST_ENV = { RECONNECT_INITIAL_MS: "200", RECONNECT_MAX_MS: "2000", SYNC_RECONCILE_SECS: "600", AUTH_STRIKES: "1" };
 
 export async function createV2Stack(o: { env?: Record<string, string | undefined>; fake?: (f: FakeImapServer) => void; fast?: boolean } = {}): Promise<Stack> {
   return createStack({

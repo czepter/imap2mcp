@@ -22,6 +22,7 @@ func newEngine(t *testing.T, srv *testimap.Server, mod func(*engine.Options)) *e
 		},
 		ReconcileEvery: time.Hour, // tests drive reconcile explicitly
 		AutoSyncEvery:  time.Hour,
+		AuthStrikes:    1,    // a single bad login latches; guard tests raise it
 		DisableWatch:   true, // resilience tests (resilience_test.go) enable the watchers
 	}
 	if mod != nil {

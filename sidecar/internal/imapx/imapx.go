@@ -37,9 +37,10 @@ func (c Creds) String() string   { return "Creds{" + c.Host + "}" }
 func (c Creds) GoString() string { return c.String() }
 
 // SameEndpoint reports whether two credential sets address the same account on
-// the same server (a password change alone does not change the identity).
+// the same server (a password change or a re-resolved IP does not change the
+// identity).
 func (c Creds) SameEndpoint(o Creds) bool {
-	return c.Host == o.Host && c.IP == o.IP && c.Port == o.Port && c.User == o.User
+	return c.Host == o.Host && c.Port == o.Port && c.User == o.User
 }
 
 // Redact removes the user name and password from a string.
@@ -163,11 +164,12 @@ type Account struct {
 	creds  Creds
 	tlsCfg func(serverName string) *tls.Config
 
-	mu         sync.Mutex
-	idle       []*conn
-	closed     bool
-	authFailed bool   // latched: the server rejected the credentials; no dial happens until ClearAuthFailure
-	onAuth     func() // called (once per latch) when authFailed is set
+	mu       sync.Mutex
+	idle     []*conn
+	closed   bool
+	guard    *AuthGuard // latch + strike policy; may be shared across Account replacements
+	authSeen bool       // onAuth already fired for the current latch
+	onAuth   func()     // called (once per latch) when the guard latches
 }
 
 type conn struct {
@@ -178,11 +180,32 @@ type conn struct {
 
 // NewAccount creates an account pool. tlsCfg must return a validating config.
 func NewAccount(creds Creds, tlsCfg func(serverName string) *tls.Config) *Account {
-	return &Account{creds: creds, tlsCfg: tlsCfg}
+	return NewAccountWithGuard(creds, tlsCfg, nil)
+}
+
+// NewAccountWithGuard is NewAccount with a caller-owned guard, so strikes and
+// the latch survive the replacement of the account. A nil guard creates a
+// default one.
+func NewAccountWithGuard(creds Creds, tlsCfg func(serverName string) *tls.Config, g *AuthGuard) *Account {
+	if g == nil {
+		g = NewAuthGuard(0, 0, nil)
+	}
+	return &Account{creds: creds, tlsCfg: tlsCfg, guard: g}
 }
 
 // Creds returns the account credentials (in-memory copy).
-func (a *Account) Creds() Creds { return a.creds }
+func (a *Account) Creds() Creds {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.creds
+}
+
+// SetIP changes the pinned IP used for future dials.
+func (a *Account) SetIP(ip string) {
+	a.mu.Lock()
+	a.creds.IP = ip
+	a.mu.Unlock()
+}
 
 // Close closes all pooled connections; in-flight ones close on release.
 func (a *Account) Close() {
@@ -209,22 +232,21 @@ func (a *Account) SetOnAuthFailed(f func()) {
 
 // AuthFailed reports whether the credentials were rejected (latched).
 func (a *Account) AuthFailed() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.authFailed
+	return a.guard.Latched()
 }
 
 // ClearAuthFailure lifts the latch so the next operation may try to log in.
 func (a *Account) ClearAuthFailure() {
+	a.guard.Clear()
 	a.mu.Lock()
-	a.authFailed = false
+	a.authSeen = false
 	a.mu.Unlock()
 }
 
 func (a *Account) latchAuth() {
 	a.mu.Lock()
-	was := a.authFailed
-	a.authFailed = true
+	was := a.authSeen
+	a.authSeen = true
 	cb := a.onAuth
 	idle := a.idle
 	a.idle = nil
@@ -263,10 +285,10 @@ func (a *Account) dial(ctx context.Context) (*conn, error) {
 // dialClient connects, logs in and returns the client. It refuses to contact
 // the server while the auth latch is set.
 func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
-	if a.AuthFailed() {
-		return nil, ErrAuth
+	if err := a.guard.admit(); err != nil {
+		return nil, err
 	}
-	cr := a.creds
+	cr := a.Creds()
 	if cr.IP == "" {
 		return nil, errors.New("no pinned ip for mailbox")
 	}
@@ -307,11 +329,15 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 			return nil, ctx.Err()
 		}
 		if isAuthRejection(err) {
-			a.latchAuth()
-			return nil, ErrAuth
+			if a.guard.reject() {
+				a.latchAuth()
+				return nil, ErrAuth
+			}
+			return nil, ErrLoginRefused
 		}
 		return nil, err
 	}
+	a.guard.ok()
 	return cl, nil
 }
 
@@ -340,7 +366,7 @@ func (a *Account) release(c *conn, ok bool) {
 		return
 	}
 	a.mu.Lock()
-	if a.closed || a.authFailed || len(a.idle) >= 2 {
+	if a.closed || a.guard.Latched() || len(a.idle) >= 2 {
 		a.mu.Unlock()
 		closeAsync(c.c)
 		return

@@ -171,6 +171,14 @@ describe.skipIf(!haveOpenssl)("mailbox admin API", () => {
     expect((await detail(id)).status).toMatchObject({ status: "unknown", lastErrorCode: null, nextRetryAt: null });
   });
 
+  it("a successful Test connection clears a latched auth_failed status; a failing one leaves it", async () => {
+    setDbStatus(id, "auth_failed", "AUTH_FAILED");
+    expect((await detail(id)).status.status).toBe("auth_failed");
+    const r = await call("POST", `/api/mailboxes/${id}/test`);
+    expect((await json<MailboxTestResult>(r)).ok).toBe(true);
+    expect((await detail(id)).status).toMatchObject({ status: "unknown", lastErrorCode: null });
+  });
+
   it("POST /:id/retry answers 204, resets the status to unknown and 404s on unknown ids", async () => {
     setDbStatus(id, "degraded", "UPSTREAM_ERROR");
     expect((await detail(id)).status.status).toBe("degraded");

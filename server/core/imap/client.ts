@@ -57,6 +57,20 @@ export function computeBackoffDelay(
   return Math.max(floor, Math.floor(rand() * cap));
 }
 
+// ---------- confirm-before-latch (one refused login is not proof of bad credentials) ----------
+/** Large providers answer a plain NO transiently (rate limits, session caps). Env AUTH_STRIKES / AUTH_COOLDOWN_MS override for tests. */
+export function authStrikeLimit(): number {
+  return Math.floor(envMs("AUTH_STRIKES", 3));
+}
+
+/** Pause after refusal number `strike` (1-based): base 30 s, x4 per further strike, capped at 30 min. */
+export function authCooldownMs(strike: number): number {
+  const base = envMs("AUTH_COOLDOWN_MS", 30_000);
+  return Math.min(30 * 60_000, base * 4 ** Math.max(0, strike - 1));
+}
+
+const authStrikes = new Map<string, number>();
+
 interface BackoffState { failures: number; nextAttemptAt: number }
 const backoff = new Map<string, BackoffState>();
 
@@ -78,7 +92,10 @@ function noteFailure(id: string): number {
 export function getBackoffState(id: string): { failures: number; nextAttemptAt: number } {
   return { ...bstate(id) };
 }
-export function resetBackoffForTests(): void { backoff.clear(); authFailedMem.clear(); }
+export function resetBackoffForTests(): void { backoff.clear(); authFailedMem.clear(); authStrikes.clear(); }
+
+/** Introspection for tests/diagnostics. */
+export function getAuthStrikes(id: string): number { return authStrikes.get(id) ?? 0; }
 
 // ---------- auth-failure latch ----------
 const authFailedMem = new Set<string>();
@@ -114,6 +131,7 @@ export function markMailboxAuthFailed(mailboxId: string): void {
 export function clearMailboxAuthFailure(mailboxId: string): void {
   authFailedMem.delete(mailboxId);
   backoff.delete(mailboxId);
+  authStrikes.delete(mailboxId);
   trySql("UPDATE mailboxes SET status = 'unknown', last_error_code = NULL, next_retry_at = NULL WHERE id = ? AND status = 'auth_failed'", mailboxId);
 }
 
@@ -185,13 +203,24 @@ async function connect(mailboxId: string): Promise<Entry> {
   } catch (e) {
     try { client.close(); } catch { /* ignore */ }
     if (isAuthFailure(e)) {
-      markMailboxAuthFailed(mailboxId);
-      throw new ImapAuthError();
+      const strike = (authStrikes.get(mailboxId) ?? 0) + 1;
+      if (strike >= authStrikeLimit()) {
+        authStrikes.delete(mailboxId);
+        markMailboxAuthFailed(mailboxId);
+        throw new ImapAuthError();
+      }
+      authStrikes.set(mailboxId, strike);
+      const delay = authCooldownMs(strike);
+      bstate(mailboxId).nextAttemptAt = Date.now() + delay;
+      log.warn("mailbox login refused; not latching until confirmed", { mailboxId, strike, nextAttemptInMs: delay });
+      // No cause: normalizeError would classify it as an auth failure again and latch.
+      throw new ImapConnectError("Login refused by the mail server", undefined, delay);
     }
     const delay = noteFailure(mailboxId);
     log.warn("mailbox connect failed", { mailboxId, errorCode: (e as { code?: string })?.code, nextAttemptInMs: delay });
     throw new ImapConnectError("Could not connect to mailbox", e, delay);
   }
+  authStrikes.delete(mailboxId);
   entry.connectedAt = Date.now();
   client.on("close", () => {
     if (Date.now() - entry.connectedAt >= HEALTHY_AFTER_MS) bstate(mailboxId).failures = 0; // was healthy: reset
