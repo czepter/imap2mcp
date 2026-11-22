@@ -174,6 +174,7 @@ type Account struct {
 	logf     func(format string, args ...any) // never receives credentials
 	noID     bool                              // do not send the IMAP ID command before login
 	okLogged bool                              // the first successful login was logged
+	relay    *relayCfg                         // when set, TLS is terminated by the Node server behind a unix socket
 }
 
 type conn struct {
@@ -210,6 +211,16 @@ func (a *Account) SetLogf(f func(format string, args ...any)) {
 func (a *Account) SetSendID(on bool) {
 	a.mu.Lock()
 	a.noID = !on
+	a.mu.Unlock()
+}
+
+// SetRelay routes every upstream connection through the TLS relay listening on
+// the unix socket at path: the relay authenticates with secret, looks the
+// destination up by mailboxID and terminates TLS itself, so this process only
+// speaks plain IMAP over the socket.
+func (a *Account) SetRelay(path, secret, mailboxID string) {
+	a.mu.Lock()
+	a.relay = &relayCfg{path: path, secret: secret, mailboxID: mailboxID}
 	a.mu.Unlock()
 }
 
@@ -320,20 +331,35 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 	if sn == "" {
 		sn = cr.Host
 	}
-	d := net.Dialer{Timeout: 30 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", net.JoinHostPort(cr.IP, strconv.Itoa(port)))
-	if err != nil {
-		return nil, err
+	remote := net.JoinHostPort(cr.IP, strconv.Itoa(port))
+	di := &dialInfo{sni: sn, remote: remote}
+	a.mu.Lock()
+	rl := a.relay
+	a.mu.Unlock()
+	var transport net.Conn
+	if rl != nil {
+		raw, err := dialRelay(ctx, rl)
+		if err != nil {
+			return nil, err
+		}
+		transport = raw
+		di.tls, di.cipher = "via-node-relay", "-"
+	} else {
+		d := net.Dialer{Timeout: 30 * time.Second}
+		raw, err := d.DialContext(ctx, "tcp", remote)
+		if err != nil {
+			return nil, err
+		}
+		tc := tls.Client(raw, a.tlsCfg(sn))
+		if err := tc.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, fmt.Errorf("tls: %w", err)
+		}
+		st := tc.ConnectionState()
+		di.tls, di.cipher = tls.VersionName(st.Version), tls.CipherSuiteName(st.CipherSuite)
+		transport = tc
 	}
-	tc := tls.Client(raw, a.tlsCfg(sn))
-	if err := tc.HandshakeContext(ctx); err != nil {
-		_ = raw.Close()
-		return nil, fmt.Errorf("tls: %w", err)
-	}
-	di := &dialInfo{sni: sn, remote: net.JoinHostPort(cr.IP, strconv.Itoa(port))}
-	st := tc.ConnectionState()
-	di.tls, di.cipher = tls.VersionName(st.Version), tls.CipherSuiteName(st.CipherSuite)
-	gc := &greetConn{Conn: tc}
+	gc := &greetConn{Conn: transport}
 	cl := imapclient.New(gc, &imapclient.Options{
 		WordDecoder:           &mime.WordDecoder{CharsetReader: charset.Reader},
 		UnilateralDataHandler: h,

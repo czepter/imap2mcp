@@ -10,9 +10,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
 	"fmt"
 	"math/big"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -187,5 +191,90 @@ func TestPlainSentWithoutInitialResponseAndAnsweredOnContinuation(t *testing.T) 
 	want := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00s3cret-pass"))
 	if len(s.resp) != 1 || s.resp[0] != want {
 		t.Fatalf("continuation response %q, want %q", s.resp, want)
+	}
+}
+
+// fakeRelay speaks the Node relay protocol on a unix socket and proxies to a
+// raw TLS server (acting as the relay's upstream TLS leg).
+func fakeRelay(t *testing.T, s *rawServer, secret, mailbox string, refuse string) (string, chan string) {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "r.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	hellos := make(chan string, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				line, err := bufio.NewReader(c).ReadString('\n')
+				if err != nil {
+					return
+				}
+				hellos <- strings.TrimSpace(line)
+				var h struct{ Auth, MailboxID string }
+				_ = json.Unmarshal([]byte(line), &h)
+				if refuse != "" || h.Auth != secret || h.MailboxID != mailbox {
+					fmt.Fprintf(c, "ERR %s\n", refuse)
+					return
+				}
+				up, err := tls.Dial("tcp", s.ln.Addr().String(), &tls.Config{RootCAs: s.pool, ServerName: "mail.example.test"})
+				if err != nil {
+					fmt.Fprint(c, "ERR upstream\n")
+					return
+				}
+				defer up.Close()
+				fmt.Fprint(c, "OK\n")
+				go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+				_, _ = io.Copy(c, up)
+			}()
+		}
+	}()
+	return sock, hellos
+}
+
+func TestRelayLoginAndErrors(t *testing.T) {
+	s := newRawServer(t, "ID AUTH=PLAIN")
+	s.okAll = true
+	sock, hellos := fakeRelay(t, s, "relay-secret-0123456789", "mb1", "")
+	cr := Creds{Host: "mail.example.test", IP: "127.0.0.1", Port: 993, User: "alice@example.test", Pass: "s3cret-pass"}
+	// tlsCfg must not be used: an empty config would fail validation if it were.
+	a := NewAccount(cr, func(string) *tls.Config { t.Error("direct TLS used with relay set"); return &tls.Config{} })
+	var mu sync.Mutex
+	var lines []string
+	a.SetLogf(func(f string, args ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, args...)); mu.Unlock() })
+	a.SetRelay(sock, "relay-secret-0123456789", "mb1")
+	if err := a.Verify(context.Background()); err != nil {
+		t.Fatalf("verify via relay: %v", err)
+	}
+	if h := <-hellos; h != `{"auth":"relay-secret-0123456789","mailboxId":"mb1"}` {
+		t.Fatalf("hello %q", h)
+	}
+	mu.Lock()
+	out := strings.Join(lines, "\n")
+	mu.Unlock()
+	if !strings.Contains(out, "tls=via-node-relay") {
+		t.Fatalf("log lacks relay marker: %s", out)
+	}
+	if c := s.commands(); len(c) == 0 || c[len(c)-1] != "AUTHENTICATE" {
+		t.Fatalf("commands %v", c)
+	}
+
+	// Refusal: plain error, no auth strike.
+	sock2, _ := fakeRelay(t, s, "x", "mb1", "mailbox not found")
+	b := NewAccount(cr, func(string) *tls.Config { return &tls.Config{} })
+	b.SetRelay(sock2, "x", "mb1")
+	err := b.Verify(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "mailbox not found") {
+		t.Fatalf("want relay refusal, got %v", err)
+	}
+	if errors.Is(err, ErrAuth) || isAuthRejection(err) || b.AuthFailed() {
+		t.Fatalf("relay refusal must not count as auth failure: %v", err)
 	}
 }

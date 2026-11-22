@@ -42,6 +42,8 @@ type Options struct {
 	MaxWatched       int           // watched folders per mailbox (INBOX + warm folders), default 4
 	Rand             func() float64
 	DisableID        bool // IMAP_SEND_ID=0: never send the IMAP ID command before login
+	TLSRelaySocket   string // SIDECAR_TLS_RELAY_SOCKET: unix socket of the Node TLS relay; empty = dial upstream directly
+	TLSRelaySecret   string // shared secret presented to the relay
 	DisableWatch     bool // tests only: no IDLE watchers / reconnect loop
 
 	AuthStrikes  int           // AUTH_STRIKES: confirmed login refusals before a mailbox latches, default 3
@@ -242,6 +244,9 @@ func (e *Engine) Open(ctx context.Context, id string, cr imapx.Creds) error {
 	}
 	acct := imapx.NewAccountWithGuard(cr, e.opts.TLS, ge.g)
 	acct.SetSendID(!e.opts.DisableID)
+	if e.opts.TLSRelaySocket != "" {
+		acct.SetRelay(e.opts.TLSRelaySocket, e.opts.TLSRelaySecret, id)
+	}
 	acct.SetLogf(func(format string, args ...any) {
 		e.opts.Logf("mailbox="+id+" "+format, args...)
 	})

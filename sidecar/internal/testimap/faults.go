@@ -254,13 +254,26 @@ func (s *faultSession) Authenticate(mech string) (sasl.Server, error) {
 	if mech != "PLAIN" || s.srv.faults.noAuthPlain.Load() {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "SASL mechanism not supported"}
 	}
-	return sasl.NewPlainServer(func(identity, user, pass string) error {
+	return &plainNilChallenge{sasl.NewPlainServer(func(identity, user, pass string) error {
 		if identity != "" && identity != user {
 			return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAuthorizationFailed, Text: "SASL identity not supported"}
 		}
 		s.srv.faults.authAttempts.Add(1)
 		return s.attempt(user, pass, false)
-	}), nil
+	})}, nil
+}
+
+// plainNilChallenge makes the empty PLAIN challenge go out as a bare "+ " (what
+// real servers send) instead of "+ =", so clients that send AUTHENTICATE PLAIN
+// without an inline initial response answer it with the credentials.
+type plainNilChallenge struct{ sasl.Server }
+
+func (p *plainNilChallenge) Next(resp []byte) ([]byte, bool, error) {
+	ch, done, err := p.Server.Next(resp)
+	if len(ch) == 0 {
+		ch = nil
+	}
+	return ch, done, err
 }
 
 func (s *faultSession) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {

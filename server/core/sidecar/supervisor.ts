@@ -39,6 +39,7 @@ export class Supervisor extends EventEmitter {
   /** Incremented on every successful (re)start; callers use it to invalidate per-process state (opened mailboxes). */
   generation = 0;
   restarts = 0;
+  private secret = "";
   private child: ChildProcess | null = null;
   private stopping = false;
   private failures = 0; // consecutive crash count for backoff
@@ -57,6 +58,9 @@ export class Supervisor extends EventEmitter {
     };
     this.client = new SidecarClient({ socketPath: opts.socketPath, secret: "unset" });
   }
+
+  /** The RPC secret of the current sidecar process ("" before the first spawn). Used to authenticate the TLS relay. */
+  currentSecret(): string { return this.secret; }
 
   private log(m: string): void { (this.o.log ?? ((s) => sidecarLog.info(s)))(m); }
 
@@ -80,6 +84,7 @@ export class Supervisor extends EventEmitter {
     if (this.stopping) return;
     this.state = "starting";
     const secret = randomBytes(32).toString("hex");
+    this.secret = secret;
     try {
       const dir = dirname(this.o.socketPath);
       mkdirSync(dir, { recursive: true, mode: 0o700 });
