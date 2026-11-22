@@ -2,7 +2,8 @@
  * Version 2 acceptance criterion 3 (mutation safety): disconnects during draft append, move and flag operations never
  * replay an ambiguous write. Asserted on the fake server's command log: exactly ONE APPEND / MOVE / STORE reaches the
  * server in every scenario, and the tool answers either "reconciled" (server state verified) or UNKNOWN_OUTCOME.
- * Read-only retries are bounded (<= 2 retries) and everything finishes inside the 30 s budget.
+ * Read-only retries are bounded (<= 2 retries) and everything finishes inside the per-call budget (30 s in production,
+ * scaled down here with TOOL_BUDGET_MS so the hung APPEND takes seconds).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { msg, sleep, type Stack } from "../helpers/stack.js";
@@ -11,7 +12,8 @@ import { ALICE, canRunV2, createV2Stack, errorLeakNeedles, expectNoLeak, expectS
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
-const BUDGET_MS = 33_000;
+const TOOL_BUDGET = 14_000; // scaled per-call budget (production: 30 s); 8 s of it stay reserved for the reconcile read
+const BUDGET_MS = TOOL_BUDGET + 3_000;
 
 describe.skipIf(!canRunV2)("v2 mutation safety (criterion 3)", () => {
   let s: Stack;
@@ -34,7 +36,7 @@ describe.skipIf(!canRunV2)("v2 mutation safety (criterion 3)", () => {
   const draft = (subject: string) => c.mcp.call("create_draft", { mailbox: box, subject, body: "draft body " + subject, to: ["to@example.org"] });
 
   beforeAll(async () => {
-    s = await createV2Stack();
+    s = await createV2Stack({ env: { TOOL_BUDGET_MS: String(TOOL_BUDGET) } });
     box = s.mailbox[ALICE];
     c = await newClient(s, box, allowAll(), "v2-mutation");
     needles = errorLeakNeedles(s, [c.token]);
@@ -98,7 +100,7 @@ describe.skipIf(!canRunV2)("v2 mutation safety (criterion 3)", () => {
       expect(drafts().length - n0).toBe(1);
     });
 
-    it("server stops answering the APPEND: returns inside 30 s with UNKNOWN_OUTCOME and never re-sends it", async () => {
+    it("server stops answering the APPEND: returns inside the budget with UNKNOWN_OUTCOME and never re-sends it", async () => {
       const n0 = drafts().length;
       const h = s.fake.inject(/^APPEND /i, { kind: "hang" });
       const t0 = Date.now();

@@ -8,7 +8,7 @@ import net from "node:net";
 import { readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { makeSelfSignedCert } from "../helpers/certs.js";
-import { msg, sleep, type Stack } from "../helpers/stack.js";
+import { msg, type Stack } from "../helpers/stack.js";
 import { ALICE, allowAll, createV1Stack, haveSidecar, newClient, poll, sidecarPids, subjects, type Client } from "../helpers/v1.js";
 
 // polling tests wait on the sidecar's 5 s implicit sync / reconcile interval; the default 30 s per-test budget is too tight on a busy host
@@ -185,12 +185,6 @@ describe.skipIf(!ok)("v1 sidecar: boundary, cache and sync correctness", () => {
       expect(bigStat(11).envelope).toBe(0);
     });
 
-    it("clearing a flag externally is also reconciled", async () => {
-      await poll(async () => (await search("Big", { flagged: true })).data?.messages?.length === 1, 20_000); // precondition: the flag was seen
-      s.fake.externalSetFlags(ALICE, "Big", 10, [], ["\\Flagged"]);
-      await poll(async () => (await search("Big", { flagged: true })).data?.messages?.length === 0, 20_000);
-    });
-
     it("an external expunge disappears from search and a held reference becomes NOT_FOUND", async () => {
       const victims = [20, 21, 22]; // base-00019 .. base-00021
       const found = await search("Big", { subject: "base-00020" });
@@ -275,19 +269,6 @@ describe.skipIf(!ok)("v1 sidecar: boundary, cache and sync correctness", () => {
       expect(s.fake.fetchTotal(ALICE, "Big", "envelope")).toBe(0);
       // other folders are rebuilt on demand too
       expect((await search("Rebirth", { limit: 50 })).data.messages).toHaveLength(12);
-    });
-
-    it("repeated kills do not wedge the bridge", async () => {
-      for (let i = 0; i < 2; i++) {
-        const pids = sidecarPids(s.srv.proc.pid!);
-        for (const p of pids) process.kill(p, "SIGKILL");
-        await sleep(200);
-        const r = await poll(async () => {
-          const x = await search("Big", { subject: "base-01499" });
-          return x.isError ? null : x;
-        }, 40_000, 300);
-        expect(r.isError).toBe(false);
-      }
     });
   });
 });

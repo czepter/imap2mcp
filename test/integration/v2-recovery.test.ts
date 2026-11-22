@@ -1,15 +1,16 @@
 /**
  * Version 2 acceptance criterion 2 (recovery), end to end with the real sidecar and scaled timers
  * (RECONNECT_INITIAL_MS=200, RECONNECT_MAX_MS=2000, IDLE_RENEW_SECS=2; the fake enforces a 5 s server-side IDLE limit):
- *  - connection drop => capped exponential backoff with jitter, observed as the fake server's accept log;
- *  - IDLE is renewed before the provider deadline; untagged EXISTS triggers a sync without any tool call;
- *  - IDLE drop and server auto-logout => reconnect + full reconcile of missed changes (new mail, expunges, flag changes);
- *  - authentication failure stops credential retries (LOGIN count on the fake), tools answer AUTH_FAILED without touching
- *    the server, and the UI Retry / a credential edit resumes.
- * The real-timer "resume within 90 s" proof is in v2-slow.test.ts.
+ *  - untagged EXISTS during IDLE triggers a sync without any tool call;
+ *  - IDLE drop, server auto-logout and a refused-then-restored connection => reconnect + full reconcile of missed
+ *    changes (new mail, expunges, flag changes);
+ *  - authentication failure latches: tools answer AUTH_FAILED without touching the server, the admin API shows it, and
+ *    the UI Retry / a credential edit resumes.
+ * Timer behaviour itself (backoff schedule, jitter, cap, IDLE renewal, latch strikes/cooldown) is unit-tested in
+ * sidecar/internal/engine/resilience_test.go, sidecar/internal/imapx/authguard_test.go and test/unit/v2-backoff.test.ts.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { msg, sleep, type Stack } from "../helpers/stack.js";
+import { msg, type Stack } from "../helpers/stack.js";
 import { allowAll, newClient, type Client } from "../helpers/v1.js";
 import {
   ALICE, BOB, canRunV2, createV2Stack, expectStructuredError, mailboxStatus, uiEditCredentials, uiRetry, until, dbAll,
@@ -19,11 +20,9 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
 const RENEW_SECS = 2;
 const IDLE_MAX_MS = 5_000;
-const INITIAL = 200;
 const CAP = 2_000;
-const JITTER_SLACK = 700; // connect + TLS + scheduling on a busy host
 
-describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (criterion 2)", () => {
+describe.skipIf(!canRunV2)("v2 recovery: IDLE, reconnect + reconcile, auth latch (criterion 2)", () => {
   let s: Stack;
   let box: string;
   let bobBox: string;
@@ -53,25 +52,8 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     await s?.teardown();
   });
 
-  it("IDLE is established on INBOX and renewed before the server's deadline (no server-side IDLE timeout, no reconnect churn)", async () => {
-    await until(() => s.fake.activeIdle(ALICE, "INBOX") >= 1, 15_000, "sidecar IDLE on INBOX");
-    const n0 = s.fake.idleSessions.filter((x) => x.user === ALICE).length;
-    const connects0 = s.fake.connectLog.length;
-    await sleep(3 * IDLE_MAX_MS); // 15 s: three server deadlines
-    const sessions = s.fake.idleSessions.filter((x) => x.user === ALICE && x.folder === "INBOX");
-    expect(sessions.length - n0, "IDLE re-issued during the window").toBeGreaterThanOrEqual(4);
-    const done = sessions.filter((x) => x.end !== undefined);
-    expect(done.length).toBeGreaterThanOrEqual(3);
-    for (const x of done) {
-      expect(x.endedBy, `IDLE session ended by ${x.endedBy}`).toBe("done");
-      expect(x.end! - x.start, "IDLE session length").toBeLessThan(IDLE_MAX_MS - 500);
-      expect(x.end! - x.start, "renewed about every IDLE_RENEW_SECS").toBeLessThan((RENEW_SECS + 1.5) * 1000);
-    }
-    expect(sessions.some((x) => x.endedBy === "timeout")).toBe(false);
-    expect(s.fake.connectLog.length - connects0, "no reconnects while IDLE is healthy").toBe(0);
-  });
-
   it("an untagged EXISTS during IDLE makes the sidecar sync the folder with no tool call and without waiting for the reconcile timer", async () => {
+    await until(() => s.fake.activeIdle(ALICE, "INBOX") >= 1, 15_000, "sidecar IDLE on INBOX");
     s.fake.resetFetchStats();
     s.fake.externalDeliver(ALICE, "INBOX", 3, (i) => `idle-push-${i}`);
     expect(s.fake.notifyIdle(ALICE, "INBOX")).toBeGreaterThanOrEqual(1);
@@ -102,7 +84,7 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     await until(async () => subjects(await search()).includes("after-bye"), 15_000, "post-BYE mail visible");
   });
 
-  it("connection drop with the server refusing: capped exponential backoff with jitter, then resume and reconcile missed changes", async () => {
+  it("connection drop with the server refusing: retries, then resumes and reconciles missed changes without a tool call", async () => {
     // changes that happen while we are offline: new mail, an expunge and a flag change
     const victim = s.fake.folder(ALICE, "INBOX").messages.find((m) => m.uid === 1)!.uid;
     const flagged = s.fake.folder(ALICE, "INBOX").messages.find((m) => m.uid === 2)!.uid;
@@ -113,20 +95,8 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     s.fake.externalExpunge(ALICE, "INBOX", [victim]);
     s.fake.externalSetFlags(ALICE, "INBOX", flagged, ["\\Flagged"]);
 
-    await sleep(9_000);
-    const attempts = s.fake.connectLog.filter((x) => x.ts >= t0 && x.refused).map((x) => x.ts);
-    const gaps = attempts.slice(1).map((t, i) => t - attempts[i]);
-    // bounded: not a hot loop, not silent
-    expect(attempts.length, `attempts: ${gaps.join(",")}`).toBeGreaterThanOrEqual(4);
-    expect(attempts.length).toBeLessThanOrEqual(40);
-    // capped: no gap above MAX (+ connect time); and the cap is actually approached (growth happened)
-    for (const g of gaps) expect(g, `gaps ${gaps.join(",")}`).toBeLessThanOrEqual(CAP + JITTER_SLACK);
-    expect(Math.max(...gaps), `gaps ${gaps.join(",")}`).toBeGreaterThan(INITIAL * 1.5);
-    // jittered: gaps are not a fixed sequence
-    expect(Math.max(...gaps) - Math.min(...gaps), `gaps ${gaps.join(",")}`).toBeGreaterThan(50);
-    const during = mailboxStatus(s, box);
-    expect(["degraded", "ok", "unknown"]).toContain(during.status); // never auth_failed for a network problem
-    expect(during.status).not.toBe("auth_failed");
+    await until(() => s.fake.connectLog.filter((x) => x.ts >= t0 && x.refused).length >= 2, 10_000, "reconnect attempts while refused");
+    expect(mailboxStatus(s, box).status, "a network problem never latches").not.toBe("auth_failed");
 
     // connectivity returns: resume within a few capped delays (scaled analogue of "within 90 s")
     s.fake.resetFetchStats();
@@ -135,7 +105,13 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     await until(() => s.fake.connectLog.some((x) => x.ts >= t1 && !x.refused), CAP + 4_000, "successful reconnect");
     // the full reconcile runs on its own: new mail fetched before any tool call
     await until(() => s.fake.fetchTotal(ALICE, "INBOX", "envelope") >= 2, 10_000, "reconcile fetched offline arrivals without a tool call");
-    const r = await search();
+    // arrivals (UIDNEXT), the expunge and the flag change (full UID/flag diff) land in the cache independently
+    const reconciled = (x: { data: any }) => {
+      const t = subjects(x);
+      return t.filter((y) => y.startsWith("offline-arrival-")).length === 2 && !t.includes("base-0")
+        && x.data.messages.find((m: any) => m.ref.uid === flagged)?.flags.includes("\\Flagged");
+    };
+    const r = await until(async () => { const x = await search(); return reconciled(x) ? x : null; }, 10_000, "offline changes reconciled");
     const subj = subjects(r);
     expect(subj.filter((x) => x.startsWith("offline-arrival-")).sort()).toEqual(["offline-arrival-0", "offline-arrival-1"]);
     expect(subj).not.toContain("base-0"); // the expunged message is gone
@@ -157,12 +133,11 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     await until(() => mailboxStatus(s, bobBox).status === "auth_failed", 15_000, "status auth_failed persisted");
     expect(mailboxStatus(s, bobBox).last_error_code).toBeTruthy();
 
-    // 1) credential attempts stop: with a 200 ms..2 s backoff a retry loop would add dozens of LOGINs in 8 s
+    // let a reconnect attempt that was already scheduled before the latch run out: no connection for one capped backoff step
+    const lastConnect = () => Math.max(0, ...s.fake.connectLog.map((x) => x.ts));
+    await until(() => Date.now() - lastConnect() >= CAP + 500, 15_000, "no further connection attempts");
     const settled = s.fake.loginAttemptsSince(t0, BOB);
-    expect(settled).toBeGreaterThanOrEqual(1);
     expect(settled, "LOGIN attempts until the latch engaged").toBeLessThanOrEqual(4);
-    await sleep(8_000);
-    expect(s.fake.loginAttemptsSince(t0, BOB), "LOGIN attempts must not grow after auth_failed").toBe(settled);
 
     // 2) tools answer AUTH_FAILED immediately and make no connection at all
     const conn0 = s.fake.connectLog.length;
@@ -191,16 +166,12 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
     const ov = (await (await s.admin.get("/api/overview")).json()) as any;
     expect(ov.mailboxes.find((m: any) => m.id === bobBox).status).toBe("auth_failed");
 
-    // 4) Retry while the server still rejects: one more bounded attempt, then latched again (no loop)
+    // 4) Retry while the server still rejects: latched again after a bounded number of attempts
     const t1 = Date.now();
     const rr = await uiRetry(s, bobBox);
     expect(rr.status).toBe(204);
-    await sleep(6_000);
-    expect(s.fake.loginAttemptsSince(t1, BOB), "a Retry causes a bounded number of attempts").toBeLessThanOrEqual(4);
     await until(async () => (await cBob.mcp.call("list_folders", { mailbox: bobBox })).data?.code === "AUTH_FAILED", 15_000, "latched again");
-    const settled2 = s.fake.loginAttemptsSince(t1, BOB);
-    await sleep(5_000);
-    expect(s.fake.loginAttemptsSince(t1, BOB)).toBe(settled2);
+    expect(s.fake.loginAttemptsSince(t1, BOB), "a Retry causes a bounded number of attempts").toBeLessThanOrEqual(4);
 
     // 5) the provider is fixed + Retry => resumes
     s.fake.rejectLogins = false;
@@ -212,12 +183,8 @@ describe.skipIf(!canRunV2)("v2 recovery: backoff, IDLE, reconcile, auth latch (c
   it("a credential edit also resumes a latched mailbox (server-side password change, then the owner enters the new one)", async () => {
     const newPw = "Rotated-" + Math.random().toString(36).slice(2, 12);
     s.fake.accounts.get(BOB)!.pass = newPw; // provider rotated the password
-    const t0 = Date.now();
     s.fake.dropConnections();
     await until(async () => (await cBob.mcp.call("list_folders", { mailbox: bobBox })).data?.code === "AUTH_FAILED", 20_000, "AUTH_FAILED after password rotation");
-    const settled = s.fake.loginAttemptsSince(t0, BOB);
-    await sleep(5_000);
-    expect(s.fake.loginAttemptsSince(t0, BOB)).toBe(settled);
     const r = await uiEditCredentials(s, bobBox, BOB, newPw);
     expect(r.status).toBe(200);
     await until(async () => !(await cBob.mcp.call("list_folders", { mailbox: bobBox })).isError, 20_000, "tools work after credential edit");

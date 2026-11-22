@@ -3,7 +3,7 @@
  * injected authentication failures, timeouts, malformed replies, quota errors and unavailable folders each produce the
  * documented structured error {code,message,requestId,retryable,operatorAction?}; nothing about the host, the user name,
  * credentials, raw server text or stack traces reaches the client; the process stays alive; and every operation returns
- * within 30 s.
+ * within the per-call budget (30 s in production, scaled down here with TOOL_BUDGET_MS so the hang tests take seconds).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { msg, sleep, type Stack } from "../helpers/stack.js";
@@ -15,7 +15,8 @@ import {
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
 const SRV = "SRVTEXT-" + Math.random().toString(36).slice(2, 10); // raw server text that must never be relayed
-const BUDGET_MS = 33_000; // 30 s upstream budget + HTTP/process overhead
+const TOOL_BUDGET = 8_000; // scaled per-call budget (production: 30 s)
+const BUDGET_MS = TOOL_BUDGET + 3_000; // + HTTP/process overhead
 
 describe.skipIf(!canRunV2)("v2 failure contracts (criterion 1)", () => {
   let s: Stack;
@@ -30,7 +31,7 @@ describe.skipIf(!canRunV2)("v2 failure contracts (criterion 1)", () => {
   const alive = () => s.srv.proc.exitCode === null && s.srv.proc.signalCode === null;
 
   beforeAll(async () => {
-    s = await createV2Stack();
+    s = await createV2Stack({ env: { TOOL_BUDGET_MS: String(TOOL_BUDGET) } });
     box = s.mailbox[ALICE];
     bobBox = s.mailbox[BOB];
     for (let i = 0; i < 3; i++) s.fake.addMessage(ALICE, "INBOX", msg(`inbox-${i}`, `inbody-${i}`));
@@ -80,7 +81,7 @@ describe.skipIf(!canRunV2)("v2 failure contracts (criterion 1)", () => {
     s.fake.loginRejectText = "NO [AUTHENTICATIONFAILED] bad credentials";
   });
 
-  it("injected timeout (server hangs on a body fetch): TIMEOUT within 30 s, retryable, then recovery; process stays alive", async () => {
+  it("injected timeout (server hangs on a body fetch): TIMEOUT within the budget, retryable, then recovery; process stays alive", async () => {
     const h = s.fake.inject(/FETCH .*BODY/i, { kind: "hang" }, Infinity);
     const t0 = Date.now();
     const r = await body();
@@ -96,7 +97,7 @@ describe.skipIf(!canRunV2)("v2 failure contracts (criterion 1)", () => {
     expect(again.data.body).toContain("inbody-");
   }, 120_000);
 
-  it("accept-then-stall (no greeting): the call still ends within 30 s with a structured retryable error", async () => {
+  it("accept-then-stall (no greeting): the call still ends within the budget with a structured retryable error", async () => {
     s.fake.stallGreeting = true;
     s.fake.dropConnections();
     const t0 = Date.now();
@@ -107,6 +108,7 @@ describe.skipIf(!canRunV2)("v2 failure contracts (criterion 1)", () => {
     expectStructuredError(r, ["TIMEOUT", "UPSTREAM_ERROR", "UNAVAILABLE"], { retryable: true });
     expectNoLeak(r.text, needles, "stall payload");
     expect(alive()).toBe(true);
+    s.fake.dropConnections(); // release the stalled connection instead of waiting for the sidecar's own dial timeout
     const again = await until(async () => { const x = await body(); return x.isError ? null : x; }, 30_000, "recovery after the stall");
     expect(again.isError).toBe(false);
   }, 120_000);
