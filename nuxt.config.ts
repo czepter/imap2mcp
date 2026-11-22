@@ -21,6 +21,7 @@ export default defineNuxtConfig({
       title: "IMAP Bridge",
       htmlAttrs: { lang: "en" },
       meta: [{ name: "viewport", content: "width=device-width, initial-scale=1" }, { name: "robots", content: "noindex" }],
+      link: [{ rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }],
     },
   },
   nitro: {
