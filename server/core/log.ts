@@ -13,7 +13,7 @@ const RANK: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 }
 const REDACTED = "[REDACTED]";
 const SECRET_KEY = /(pass(word|wd)?|secret|token|authorization|auth|cookie|api[-_]?key|private[-_]?key|code[-_]?verifier|credential|encryption[-_]?key|session[-_]?secret|^code$|^pass$|^pw$)/i;
 // Keys that look secret but are safe metadata.
-const SAFE_KEY = /^(tokenId|token_id|clientId|requestId|authMethod|auth_method|errorCode|error_code|tokenType|token_type|tokens|tokenCount)$/;
+const SAFE_KEY = /^(pass_len|pass_sha|pass_trim|pass_ascii|tokenId|token_id|clientId|requestId|authMethod|auth_method|errorCode|error_code|tokenType|token_type|tokens|tokenCount)$/;
 
 let extraSecrets: string[] = [];
 let envCache: { sig: string; values: string[] } | null = null;

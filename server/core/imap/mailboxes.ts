@@ -6,6 +6,8 @@ import { CredentialDecryptError } from "./credentialError.js";
 import { assertHostAllowed } from "./ssrf.js";
 import { clearMailboxAuthFailure } from "./client.js";
 import { retryMailbox } from "../sidecar/index.js";
+import { log } from "../log.js";
+import { credFingerprint } from "../credFingerprint.js";
 
 export interface Mailbox {
   id: string;
@@ -115,6 +117,7 @@ export async function testMailbox(id: string): Promise<TestResult> {
   let creds;
   try {
     creds = getMailboxCredentials(id);
+    log.info("cred fingerprint", { where: "test", mailboxId: id, ...credFingerprint(creds.user, creds.password) });
   } catch {
     return { ok: false, message: "Mailbox not found or credentials unreadable.", folders: [] };
   }

@@ -2,6 +2,8 @@ import { getMailboxCredentials } from "../imap/mailboxes.js";
 import { assertHostAllowed } from "../imap/ssrf.js";
 import { Supervisor, type SupervisorOptions } from "./supervisor.js";
 import { RPC_UNKNOWN_MAILBOX, RPC_UPSTREAM, SidecarRpcError } from "./errors.js";
+import { log } from "../log.js";
+import { credFingerprint } from "../credFingerprint.js";
 import type { SidecarStatus, StatusSource } from "./status.js";
 
 export interface OpenParams {
@@ -13,6 +15,7 @@ export type OpenParamsProvider = (mailboxId: string) => Promise<OpenParams>;
 
 export const defaultOpenParams: OpenParamsProvider = async (mailboxId) => {
   const c = getMailboxCredentials(mailboxId);
+  log.info("cred fingerprint", { where: "sidecar-open", mailboxId, ...credFingerprint(c.user, c.password) });
   const addrs = await assertHostAllowed(c.host); // same SSRF policy + DNS pinning as the v0 direct path
   return { mailboxId, host: c.host, ip: addrs[0], port: c.port, servername: c.host, user: c.user, pass: c.password };
 };
