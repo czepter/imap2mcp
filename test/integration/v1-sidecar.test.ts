@@ -108,6 +108,18 @@ describe.skipIf(!ok)("v1 sidecar: boundary, cache and sync correctness", () => {
       expect(s.fake.fetchStat(ALICE, "Sent", m.ref.uid).body).toBeGreaterThanOrEqual(3);
       expect(s.fake.folder(ALICE, "Sent").messages.find((x) => x.uid === m.ref.uid)!.flags.has("\\Seen")).toBe(false);
     });
+
+    it("an HTML-only body comes back as plain text", async () => {
+      s.fake.addMessage(ALICE, "Sent", "From: Shop <billing@shop.example>\r\nTo: alice@example.test\r\nSubject: html-only\r\n"
+        + "MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+        + "<html><head><style>p{}</style></head><body><p>Betrag</p><p>99,00&nbsp;&euro;</p></body></html>\r\n");
+      const m = (await poll(async () => {
+        const r = await search("Sent", { subject: "html-only" });
+        return r.data?.messages?.length ? r : null;
+      }, 20_000)).data.messages[0];
+      const r = await c.mcp.call("read_message", { ref: m.ref, include: ["body"] });
+      expect(r.data).toMatchObject({ bodyType: "text/plain", convertedFrom: "text/html", body: "Betrag\n\n99,00 €" });
+    });
   });
 
   describe("cold sync and cache reuse", () => {
