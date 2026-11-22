@@ -7,7 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/emersion/go-sasl"
 )
 
 // faults holds the fault-injection switches and observation counters of a
@@ -16,15 +18,19 @@ type faults struct {
 	mu    sync.Mutex
 	conns map[*faultConn]struct{}
 
-	rejectLogin atomic.Bool
-	hang        atomic.Bool
-	blocked     atomic.Bool
-	hideIdle    atomic.Bool
-	idleLimit   atomic.Int64 // ns; the server kills a connection that stays in IDLE this long
+	rejectLogin    atomic.Bool
+	rejectLoginCmd atomic.Bool
+	noAuthPlain    atomic.Bool
+	hang           atomic.Bool
+	blocked        atomic.Bool
+	hideIdle       atomic.Bool
+	idleLimit      atomic.Int64 // ns; the server kills a connection that stays in IDLE this long
 
 	accepted      atomic.Int64
 	logins        atomic.Int64
 	loginFailures atomic.Int64
+	loginCmds     atomic.Int64
+	authAttempts  atomic.Int64
 	idleStarts    atomic.Int64
 	idleKills     atomic.Int64
 	idleActive    atomic.Int64
@@ -38,6 +44,15 @@ func (f *faults) init() { f.conns = map[*faultConn]struct{}{} }
 
 // SetRejectLogin makes every LOGIN fail with NO [AUTHENTICATIONFAILED].
 func (f *faults) SetRejectLogin(v bool) { f.rejectLogin.Store(v) }
+
+// SetRejectLoginCommand makes the LOGIN command (only) fail with NO
+// [AUTHENTICATIONFAILED]; AUTHENTICATE PLAIN keeps working. It models servers
+// that refuse LOGIN but accept SASL.
+func (f *faults) SetRejectLoginCommand(v bool) { f.rejectLoginCmd.Store(v) }
+
+// SetNoAuthPlain stops the server from advertising AUTH=PLAIN, so clients have
+// to use the LOGIN command.
+func (f *faults) SetNoAuthPlain(v bool) { f.noAuthPlain.Store(v) }
 
 // SetHang stops the server from reading and writing on every connection
 // (existing and new): requests sent to it get no answer.
@@ -90,10 +105,18 @@ func (f *faults) Accepted() int64 { return f.accepted.Load() }
 // Open is the number of currently open connections.
 func (f *faults) Open() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.conns) }
 
-// Logins is the number of LOGIN attempts seen (successful or not).
+// LoginCommands is the number of LOGIN commands seen (successful or not).
+func (f *faults) LoginCommands() int64 { return f.loginCmds.Load() }
+
+// AuthAttempts is the number of AUTHENTICATE commands that reached credential
+// checking (successful or not).
+func (f *faults) AuthAttempts() int64 { return f.authAttempts.Load() }
+
+// Logins is the number of login attempts seen, via LOGIN or AUTHENTICATE
+// (successful or not).
 func (f *faults) Logins() int64 { return f.logins.Load() }
 
-// LoginFailures is the number of rejected LOGIN attempts.
+// LoginFailures is the number of rejected login attempts (LOGIN or AUTHENTICATE).
 func (f *faults) LoginFailures() int64 { return f.loginFailures.Load() }
 
 // IdleStarts is the number of IDLE commands seen.
@@ -200,16 +223,44 @@ type faultSession struct {
 }
 
 func (s *faultSession) Login(user, pass string) error {
+	s.srv.faults.loginCmds.Add(1)
+	return s.attempt(user, pass, s.srv.faults.rejectLoginCmd.Load())
+}
+
+// attempt records one credential check and applies the reject switches.
+func (s *faultSession) attempt(user, pass string, extraReject bool) error {
 	f := &s.srv.faults
 	f.logins.Add(1)
 	f.timesMu.Lock()
 	f.loginTimes = append(f.loginTimes, time.Now())
 	f.timesMu.Unlock()
-	if f.rejectLogin.Load() {
+	if f.rejectLogin.Load() || extraReject {
 		f.loginFailures.Add(1)
 		return imapserver.ErrAuthFailed
 	}
 	return s.SessionIMAP4rev2.Login(user, pass)
+}
+
+// AuthenticateMechanisms implements imapserver.SessionSASL.
+func (s *faultSession) AuthenticateMechanisms() []string {
+	if s.srv.faults.noAuthPlain.Load() {
+		return nil
+	}
+	return []string{"PLAIN"}
+}
+
+// Authenticate implements imapserver.SessionSASL (PLAIN only).
+func (s *faultSession) Authenticate(mech string) (sasl.Server, error) {
+	if mech != "PLAIN" || s.srv.faults.noAuthPlain.Load() {
+		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "SASL mechanism not supported"}
+	}
+	return sasl.NewPlainServer(func(identity, user, pass string) error {
+		if identity != "" && identity != user {
+			return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAuthorizationFailed, Text: "SASL identity not supported"}
+		}
+		s.srv.faults.authAttempts.Add(1)
+		return s.attempt(user, pass, false)
+	}), nil
 }
 
 func (s *faultSession) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {

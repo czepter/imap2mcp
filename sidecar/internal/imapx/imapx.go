@@ -20,6 +20,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-message/charset"
+	"github.com/emersion/go-sasl"
 )
 
 // Creds holds the connection parameters of one mailbox. It lives in memory
@@ -323,7 +324,7 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 		}
 		return nil, err
 	}
-	if err := cl.Login(cr.User, cr.Pass).Wait(); err != nil {
+	if err := authenticate(cl, cr); err != nil {
 		closeAsync(cl)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -339,6 +340,17 @@ func (a *Account) dialClient(ctx context.Context, h *imapclient.UnilateralDataHa
 	}
 	a.guard.ok()
 	return cl, nil
+}
+
+// authenticate logs in with SASL PLAIN when the server advertises it (some
+// providers refuse the LOGIN command for credentials AUTHENTICATE accepts), and
+// with LOGIN otherwise. Exactly one attempt is made: a refused AUTHENTICATE is
+// not retried as LOGIN. Caps asks the server when the greeting carried none.
+func authenticate(cl *imapclient.Client, cr Creds) error {
+	if cl.Caps().Has(imap.AuthCap("PLAIN")) {
+		return cl.Authenticate(sasl.NewPlainClient("", cr.User, cr.Pass))
+	}
+	return cl.Login(cr.User, cr.Pass).Wait()
 }
 
 func (a *Account) acquire(ctx context.Context) (*conn, bool, error) {
