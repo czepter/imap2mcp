@@ -41,6 +41,15 @@ func envMillis(name string, def time.Duration) time.Duration {
 	return def
 }
 
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
 func main() {
 	socket := flag.String("socket", "", "unix socket path (default $SIDECAR_SOCKET or $DATA_DIR/sidecar.sock)")
 	flag.Parse()
@@ -93,6 +102,8 @@ func main() {
 		ReconnectInitial: envMillis("RECONNECT_INITIAL_MS", time.Second),
 		ReconnectMax:     envMillis("RECONNECT_MAX_MS", 60*time.Second),
 		HealthyReset:     envMillis("RECONNECT_HEALTHY_MS", 30*time.Second),
+		AuthStrikes:      envInt("AUTH_STRIKES", 3),
+		AuthCooldown:     envMillis("AUTH_COOLDOWN_MS", 30*time.Second),
 	})
 	srv, err := rpc.New(rpc.Config{Socket: path, Secret: secret, Logf: logger.Printf}, eng)
 	if err != nil {

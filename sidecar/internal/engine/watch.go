@@ -440,11 +440,16 @@ func (s *supervisor) manage() {
 // Status reports the connection state of a mailbox.
 func (e *Engine) Status(id string) Status {
 	e.mu.RLock()
-	fo, rejected := e.failedOpen[id]
+	ge := e.guards[id]
+	var since time.Time
+	rejected := false
+	if ge != nil && !ge.since.IsZero() && ge.g.Latched() {
+		rejected, since = true, ge.since
+	}
 	mb := e.mailboxes[id]
 	e.mu.RUnlock()
 	if rejected {
-		return Status{State: StateAuthFailed, Since: ts(fo.since), LastErrorCode: "AUTH_FAILED"}
+		return Status{State: StateAuthFailed, Since: ts(since), LastErrorCode: "AUTH_FAILED"}
 	}
 	if mb == nil {
 		return Status{State: StateClosed, Since: ts(e.opts.Now())}

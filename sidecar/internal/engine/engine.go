@@ -42,6 +42,9 @@ type Options struct {
 	MaxWatched       int           // watched folders per mailbox (INBOX + warm folders), default 4
 	Rand             func() float64
 	DisableWatch     bool // tests only: no IDLE watchers / reconnect loop
+
+	AuthStrikes  int           // AUTH_STRIKES: confirmed login refusals before a mailbox latches, default 3
+	AuthCooldown time.Duration // AUTH_COOLDOWN_MS: pause after the first refusal (x4 per further strike), default 30 s
 }
 
 func (o *Options) defaults() {
@@ -93,6 +96,12 @@ func (o *Options) defaults() {
 	if o.Rand == nil {
 		o.Rand = rand.Float64
 	}
+	if o.AuthStrikes <= 0 {
+		o.AuthStrikes = imapx.DefaultAuthStrikes
+	}
+	if o.AuthCooldown <= 0 {
+		o.AuthCooldown = imapx.DefaultAuthCooldown
+	}
 }
 
 // Engine owns all mailboxes.
@@ -101,19 +110,23 @@ type Engine struct {
 
 	mu        sync.RWMutex
 	mailboxes map[string]*mailbox
-	// failedOpen remembers credentials the server rejected at open time, so
-	// that repeated opens with the same credentials do not hit the server.
-	failedOpen map[string]failedOpen
+	// guards holds one login guard per mailbox id. It survives Account
+	// replacement and failed opens, so refused logins keep counting and a
+	// latched wrong password is not retried by every new Open.
+	guards map[string]*guardEntry
 }
 
-type failedOpen struct {
+type guardEntry struct {
 	fp    [sha256.Size]byte
-	since time.Time
+	g     *imapx.AuthGuard
+	since time.Time // set when an Open latched the guard (no supervisor exists then)
 }
 
+// fingerprint identifies the credentials a guard belongs to. The IP is left
+// out: DNS round-robin changes it without changing the credentials.
 func fingerprint(cr imapx.Creds) [sha256.Size]byte {
 	h := sha256.New()
-	for _, p := range []string{cr.Host, cr.IP, cr.ServerName, cr.User, cr.Pass} {
+	for _, p := range []string{cr.Host, cr.ServerName, cr.User, cr.Pass} {
 		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
@@ -121,6 +134,20 @@ func fingerprint(cr imapx.Creds) [sha256.Size]byte {
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+// guardFor returns the guard for id and these credentials, replacing it when
+// the credentials changed.
+func (e *Engine) guardFor(id string, cr imapx.Creds) *guardEntry {
+	fp := fingerprint(cr)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ge := e.guards[id]
+	if ge == nil || ge.fp != fp {
+		ge = &guardEntry{fp: fp, g: imapx.NewAuthGuard(e.opts.AuthStrikes, e.opts.AuthCooldown, e.opts.Now)}
+		e.guards[id] = ge
+	}
+	return ge
 }
 
 type mailbox struct {
@@ -136,7 +163,7 @@ type mailbox struct {
 // New creates an engine.
 func New(opts Options) *Engine {
 	opts.defaults()
-	return &Engine{opts: opts, mailboxes: map[string]*mailbox{}, failedOpen: map[string]failedOpen{}}
+	return &Engine{opts: opts, mailboxes: map[string]*mailbox{}, guards: map[string]*guardEntry{}}
 }
 
 func (e *Engine) mailbox(id string) (*mailbox, error) {
@@ -179,20 +206,30 @@ func (e *Engine) Open(ctx context.Context, id string, cr imapx.Creds) error {
 	if id == "" || cr.Host == "" || cr.IP == "" || cr.User == "" {
 		return errf(CodeInvalidParams, "mailboxId, host, ip and user are required")
 	}
-	fp := fingerprint(cr)
-	e.mu.RLock()
-	fo, rejected := e.failedOpen[id]
-	mb := e.mailboxes[id]
-	e.mu.RUnlock()
-	if rejected && fo.fp == fp {
+	ge := e.guardFor(id, cr)
+	if ge.g.Latched() {
 		return errAuthFailed()
 	}
+	e.mu.RLock()
+	mb := e.mailboxes[id]
+	e.mu.RUnlock()
 	if mb != nil {
-		mb.mu.RLock()
-		same, acct := mb.acct != nil && mb.creds == cr, mb.acct
-		mb.mu.RUnlock()
+		mb.mu.Lock()
+		var same bool
+		var acct *imapx.Account
+		if mb.acct != nil {
+			cmp := cr
+			cmp.IP = mb.creds.IP
+			same, acct = mb.creds == cmp, mb.acct
+			if same {
+				mb.creds = cr
+			}
+		}
+		mb.mu.Unlock()
 		if same {
-			// Idempotent re-open: keep the account, watchers and cache.
+			// Idempotent re-open (possibly with a re-resolved IP): keep the
+			// account, watchers and cache.
+			acct.SetIP(cr.IP)
 			if acct.AuthFailed() {
 				return errAuthFailed()
 			}
@@ -202,18 +239,19 @@ func (e *Engine) Open(ctx context.Context, id string, cr imapx.Creds) error {
 			return nil
 		}
 	}
-	acct := imapx.NewAccount(cr, e.opts.TLS)
+	acct := imapx.NewAccountWithGuard(cr, e.opts.TLS, ge.g)
 	if err := acct.Verify(ctx); err != nil {
 		acct.Close()
 		if errors.Is(err, imapx.ErrAuth) {
 			e.mu.Lock()
-			e.failedOpen[id] = failedOpen{fp: fp, since: e.opts.Now()}
+			if ge.since.IsZero() {
+				ge.since = e.opts.Now()
+			}
 			e.mu.Unlock()
 		}
 		return upstream(cr, err)
 	}
 	e.mu.Lock()
-	delete(e.failedOpen, id)
 	mb = e.mailboxes[id]
 	if mb == nil {
 		mb = &mailbox{id: id, folders: map[string]*folderCache{}}
@@ -246,7 +284,10 @@ func (e *Engine) Open(ctx context.Context, id string, cr imapx.Creds) error {
 // mailboxes are fine: there is nothing latched.
 func (e *Engine) Retry(id string) {
 	e.mu.Lock()
-	delete(e.failedOpen, id)
+	if ge := e.guards[id]; ge != nil {
+		ge.g.Clear()
+		ge.since = time.Time{}
+	}
 	mb := e.mailboxes[id]
 	e.mu.Unlock()
 	if mb == nil {
@@ -268,7 +309,7 @@ func (e *Engine) Close(id string) {
 	e.mu.Lock()
 	mb := e.mailboxes[id]
 	delete(e.mailboxes, id)
-	delete(e.failedOpen, id)
+	delete(e.guards, id)
 	e.mu.Unlock()
 	if mb != nil {
 		mb.mu.Lock()

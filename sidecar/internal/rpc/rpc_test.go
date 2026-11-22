@@ -48,7 +48,7 @@ func newHarness(t *testing.T, timeout time.Duration) *harness {
 		TLS: func(sn string) *tls.Config {
 			return &tls.Config{RootCAs: srv.CAPool, ServerName: sn, MinVersion: tls.VersionTLS12}
 		},
-		AutoSyncEvery: time.Hour, ReconcileEvery: time.Hour, Logf: logf,
+		AutoSyncEvery: time.Hour, ReconcileEvery: time.Hour, Logf: logf, AuthStrikes: 1,
 	})
 	s, err := rpc.New(rpc.Config{Socket: sock, Secret: secret, RequestTimeout: timeout, Logf: logf}, eng)
 	if err != nil {

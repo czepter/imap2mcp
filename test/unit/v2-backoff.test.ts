@@ -39,8 +39,9 @@ beforeEach(async () => {
   resetBackoffForTests();
   delete process.env.RECONNECT_INITIAL_MS;
   delete process.env.RECONNECT_MAX_MS;
+  process.env.AUTH_STRIKES = "1"; // a single refusal latches; the strike-policy tests raise it
 });
-afterEach(() => { withStatusColumn = true; delete process.env.RECONNECT_INITIAL_MS; delete process.env.RECONNECT_MAX_MS; });
+afterEach(() => { withStatusColumn = true; delete process.env.RECONNECT_INITIAL_MS; delete process.env.RECONNECT_MAX_MS; delete process.env.AUTH_STRIKES; delete process.env.AUTH_COOLDOWN_MS; });
 
 describe("computeBackoffDelay: capped exponential, full jitter, floor 500 ms", () => {
   it("grows 1s,2s,4s... and caps at 60s (upper bound of the jitter window)", () => {
@@ -179,5 +180,68 @@ describe("bounded jittered read retries inside the budget", () => {
     const fn = vi.fn(async () => { throw new ToolError("UPSTREAM_ERROR", "down"); });
     await withBudget(() => readOp("mb", fn, () => 0), 800).catch(() => {});
     expect(fn.mock.calls.length).toBeLessThan(3);
+  });
+});
+
+describe("confirm-before-latch: transient login refusals do not latch", () => {
+  const refuse = () => { connectBehavior = async () => { throw Object.assign(new Error("Command failed"), { authenticationFailed: true, responseStatus: "NO" }); }; };
+
+  it("the first refusal throws ImapConnectError (no cause), sets a cooldown and does not latch", async () => {
+    process.env.AUTH_STRIKES = "3";
+    process.env.AUTH_COOLDOWN_MS = "1000";
+    refuse();
+    const err1 = await withImap("mb", async () => 1).catch((e) => e);
+    expect(err1).toBeInstanceOf(ImapConnectError);
+    expect(err1.cause).toBeUndefined();
+    expect(err1.retryAfterMs).toBe(1000);
+    expect(isMailboxAuthFailed("mb")).toBe(false);
+    expect(client.getAuthStrikes("mb")).toBe(1);
+    expect(getBackoffState("mb").nextAttemptAt).toBeGreaterThan(Date.now());
+  });
+
+  it("cooldown grows x4 per strike and the third confirmed refusal latches", async () => {
+    process.env.AUTH_STRIKES = "3";
+    process.env.AUTH_COOLDOWN_MS = "30";
+    expect(client.authCooldownMs(1)).toBe(30);
+    expect(client.authCooldownMs(2)).toBe(120);
+    expect(client.authCooldownMs(3)).toBe(480);
+    refuse();
+    const e1 = await withImap("mb", async () => 1).catch((e) => e);
+    expect(e1).toBeInstanceOf(ImapConnectError);
+    expect(isMailboxAuthFailed("mb")).toBe(false);
+    const early = await withImap("mb", async () => 1).catch((e) => e); // inside the cooldown: no connect attempt, no new strike
+    expect(early).toBeInstanceOf(ImapConnectError);
+    expect(client.getAuthStrikes("mb")).toBe(1);
+    await new Promise((r) => setTimeout(r, 40));
+    const e2 = await withImap("mb", async () => 1).catch((e) => e);
+    expect(e2).toBeInstanceOf(ImapConnectError);
+    expect(client.getAuthStrikes("mb")).toBe(2);
+    expect(isMailboxAuthFailed("mb")).toBe(false);
+    await new Promise((r) => setTimeout(r, 140));
+    const e3 = await withImap("mb", async () => 1).catch((e) => e);
+    expect(e3).toBeInstanceOf(ImapAuthError);
+    expect(isMailboxAuthFailed("mb")).toBe(true);
+  });
+
+  it("a successful connect resets the strikes", async () => {
+    process.env.AUTH_STRIKES = "3";
+    process.env.AUTH_COOLDOWN_MS = "10";
+    refuse();
+    await withImap("mb", async () => 1).catch(() => {});
+    expect(client.getAuthStrikes("mb")).toBe(1);
+    await new Promise((r) => setTimeout(r, 30));
+    connectBehavior = async () => {};
+    expect(await withImap("mb", async () => 7)).toBe(7);
+    expect(client.getAuthStrikes("mb")).toBe(0);
+  });
+
+  it("clearMailboxAuthFailure forgets strikes", async () => {
+    process.env.AUTH_STRIKES = "3";
+    process.env.AUTH_COOLDOWN_MS = "10";
+    refuse();
+    await withImap("mb", async () => 1).catch(() => {});
+    expect(client.getAuthStrikes("mb")).toBe(1);
+    clearMailboxAuthFailure("mb");
+    expect(client.getAuthStrikes("mb")).toBe(0);
   });
 });
