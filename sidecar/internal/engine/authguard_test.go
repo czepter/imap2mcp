@@ -164,3 +164,43 @@ func TestSameEndpointIgnoresIP(t *testing.T) {
 		t.Fatal("user is part of the identity")
 	}
 }
+
+func TestLoginUsesSASLPlainWhenAdvertised(t *testing.T) {
+	srv := testimap.New(t)
+	e, _ := guardEngine(t, srv)
+	srv.SetRejectLoginCommand(true) // like a provider that refuses LOGIN but accepts SASL
+	if err := e.Open(ctx(), "mb1", creds(srv)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.ListFolders(ctx(), "mb1"); err != nil {
+		t.Fatal(err)
+	}
+	if srv.LoginCommands() != 0 || srv.AuthAttempts() < 1 {
+		t.Fatalf("LOGIN commands %d, AUTHENTICATE attempts %d", srv.LoginCommands(), srv.AuthAttempts())
+	}
+}
+
+func TestLoginCommandWhenPlainNotAdvertised(t *testing.T) {
+	srv := testimap.New(t)
+	e, _ := guardEngine(t, srv)
+	srv.SetNoAuthPlain(true)
+	if err := e.Open(ctx(), "mb1", creds(srv)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.ListFolders(ctx(), "mb1"); err != nil {
+		t.Fatal(err)
+	}
+	if srv.AuthAttempts() != 0 || srv.LoginCommands() < 1 {
+		t.Fatalf("LOGIN commands %d, AUTHENTICATE attempts %d", srv.LoginCommands(), srv.AuthAttempts())
+	}
+}
+
+func TestRefusedAuthenticateCountsOneStrikeWithoutLoginFallback(t *testing.T) {
+	srv := testimap.New(t)
+	e, _ := guardEngine(t, srv)
+	srv.SetRejectLogin(true)
+	assertCode(t, e.Open(ctx(), "mb1", creds(srv)), engine.CodeUpstream)
+	if srv.AuthAttempts() != 1 || srv.LoginCommands() != 0 || srv.LoginFailures() != 1 {
+		t.Fatalf("auth %d, login cmds %d, failures %d", srv.AuthAttempts(), srv.LoginCommands(), srv.LoginFailures())
+	}
+}
