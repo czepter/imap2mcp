@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { log } from "../log.js";
 import { getDb } from "../db/database.js";
 import { SidecarService } from "./service.js";
+import { tlsRelayEnabled } from "./tlsRelay.js";
 import { StatusPoller } from "./status.js";
 
 export * from "./errors.js";
@@ -20,6 +21,7 @@ export const SIDECAR_ENV_KNOBS = [
   "IDLE_RENEW_SECS", "IDLE_POLL_SECS", "SIDECAR_FOLDER_IDLE_SECS",
   "RECONNECT_INITIAL_MS", "RECONNECT_MAX_MS", "RECONNECT_HEALTHY_MS", // tests only
   "AUTH_STRIKES", "AUTH_COOLDOWN_MS", "IMAP_SEND_ID",
+  // IMAP_TLS_RELAY is handled in createSidecarFromConfig: it decides whether SIDECAR_TLS_RELAY_SOCKET is passed.
 ] as const;
 
 export function sidecarEnabled(): boolean { return !config.sidecarDisabled; }
@@ -41,7 +43,13 @@ export function createSidecarFromConfig(): SidecarService {
     const v = process.env[k];
     if (v) env[k] = v;
   }
-  return new SidecarService({ bin: config.sidecarBin, socketPath: join(config.dataDir, "sidecar.sock"), env });
+  let tlsRelaySocket: string | undefined;
+  if (tlsRelayEnabled()) {
+    // Node terminates TLS for the sidecar (Node/OpenSSL ClientHello instead of Go's, which some providers refuse).
+    tlsRelaySocket = join(config.dataDir, "tls-relay.sock");
+    env.SIDECAR_TLS_RELAY_SOCKET = tlsRelaySocket;
+  }
+  return new SidecarService({ bin: config.sidecarBin, socketPath: join(config.dataDir, "sidecar.sock"), env, tlsRelaySocket });
 }
 
 /** Start at app boot. Never throws: tools return UPSTREAM_ERROR while the sidecar is down; supervision keeps retrying. */

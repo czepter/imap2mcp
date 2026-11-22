@@ -122,9 +122,17 @@ export async function testMailbox(id: string): Promise<TestResult> {
     return { ok: false, message: "Mailbox not found or credentials unreadable.", folders: [] };
   }
   let client: ImapFlow | null = null;
+  let remote = "";
+  const logTest = (outcome: "ok" | "failed") => {
+    const sock = (client as any)?.socket as import("tls").TLSSocket | undefined;
+    let tlsProtocol: string | null = null, cipher: string | undefined;
+    try { tlsProtocol = sock?.getProtocol?.() ?? null; cipher = sock?.getCipher?.()?.name; } catch { /* socket already gone */ }
+    log.info("imap test connection", { mailboxId: id, remote, tlsProtocol, cipher, outcome });
+  };
   try {
     const addrs = await assertHostAllowed(creds.host);
     // connect to the vetted address, validate the cert against the real host name (anti DNS-rebinding)
+    remote = `${addrs[0]}:${creds.port}`;
     client = new ImapFlow({
       host: addrs[0],
       port: creds.port,
@@ -139,7 +147,8 @@ export async function testMailbox(id: string): Promise<TestResult> {
       connectionTimeout: 15000,
     } as any);
     client.on("error", () => {});
-    await client.connect();
+    try { await client.connect(); } catch (e) { logTest("failed"); throw e; }
+    logTest("ok");
     const list = await client.list();
     const folders = list.filter((f) => !f.flags?.has("\\Noselect")).map((f) => f.path).sort((a, b) => a.localeCompare(b));
     return { ok: true, message: `Connected. ${folders.length} folder(s) found.`, folders };

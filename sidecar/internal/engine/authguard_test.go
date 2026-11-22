@@ -233,7 +233,7 @@ func TestRefusedLoginIsLoggedWithServerReplyAndCooldownIsDeferred(t *testing.T) 
 	}
 	out := logs()
 	for _, want := range []string{
-		"mailbox=mb1", "host=mail.example.test", `method="AUTHENTICATE PLAIN"`, "status=NO",
+		"mailbox=mb1", "host=mail.example.test", `method="AUTHENTICATE PLAIN (no SASL-IR)"`, "status=NO",
 		`code="AUTHENTICATIONFAILED"`, "text=", "auth_rejection=true", "strike=1/3", "latched=false",
 	} {
 		if !strings.Contains(out, want) {

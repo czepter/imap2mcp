@@ -114,6 +114,8 @@ func main() {
 		AuthStrikes:      envInt("AUTH_STRIKES", 3),
 		AuthCooldown:     envMillis("AUTH_COOLDOWN_MS", 30*time.Second),
 		DisableID:        envOff("IMAP_SEND_ID"),
+		TLSRelaySocket:   os.Getenv("SIDECAR_TLS_RELAY_SOCKET"),
+		TLSRelaySecret:   secret,
 	})
 	srv, err := rpc.New(rpc.Config{Socket: path, Secret: secret, Logf: logger.Printf}, eng)
 	if err != nil {

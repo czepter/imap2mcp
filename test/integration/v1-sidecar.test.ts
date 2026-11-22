@@ -97,6 +97,12 @@ describe.skipIf(!ok)("v1 sidecar: boundary, cache and sync correctness", () => {
       expect(JSON.stringify(r2.replies)).not.toMatch(/INBOX|Archive/);
     });
 
+    it("upstream TLS is terminated by the Node relay (the sidecar never dials TLS itself)", () => {
+      const out = s.srv.output();
+      expect(out).toContain("tls relay connected");
+      expect(out).toContain("via-node-relay");
+    });
+
     it("bodies are never cached: every read_message goes to IMAP, with BODY.PEEK (no \\Seen)", async () => {
       s.fake.addMessage(ALICE, "Sent", msg("peek-me", "peek body text"));
       const m = (await poll(async () => {

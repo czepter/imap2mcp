@@ -1,5 +1,6 @@
 import { getMailboxCredentials } from "../imap/mailboxes.js";
 import { assertHostAllowed } from "../imap/ssrf.js";
+import { TlsRelay } from "./tlsRelay.js";
 import { Supervisor, type SupervisorOptions } from "./supervisor.js";
 import { RPC_UNKNOWN_MAILBOX, RPC_UPSTREAM, SidecarRpcError } from "./errors.js";
 import { log } from "../log.js";
@@ -26,6 +27,8 @@ export interface SidecarServiceOptions extends SupervisorOptions {
   readyWaitMs?: number;
   /** Re-send credentials to the sidecar after this long (picks up admin password edits). */
   reopenAfterMs?: number;
+  /** Unix socket of the Node TLS relay for the sidecar's upstream connections; omitted = the sidecar dials TLS itself. */
+  tlsRelaySocket?: string;
 }
 
 /**
@@ -34,6 +37,7 @@ export interface SidecarServiceOptions extends SupervisorOptions {
  */
 export class SidecarService implements StatusSource {
   readonly supervisor: Supervisor;
+  private readonly relay: TlsRelay | null;
   private opened = new Map<string, { gen: number; at: number }>();
   private opening = new Map<string, Promise<void>>();
   /** Mailboxes whose last `open` was refused for bad credentials: the sidecar has no session for them but reports auth_failed. */
@@ -44,13 +48,24 @@ export class SidecarService implements StatusSource {
 
   constructor(opts: SidecarServiceOptions) {
     this.supervisor = new Supervisor(opts);
+    this.relay = opts.tlsRelaySocket
+      ? new TlsRelay({ socketPath: opts.tlsRelaySocket, getSecret: () => this.supervisor.currentSecret() })
+      : null;
     this.openParams = opts.openParams ?? defaultOpenParams;
     this.readyWaitMs = opts.readyWaitMs ?? 5_000;
     this.reopenAfterMs = opts.reopenAfterMs ?? 5 * 60_000;
   }
 
-  start(): Promise<void> { return this.supervisor.start(); }
-  async stop(): Promise<void> { this.opened.clear(); await this.supervisor.stop(); }
+  /** The relay listens before the sidecar spawns, so the first upstream dial finds it. */
+  async start(): Promise<void> {
+    await this.relay?.start();
+    return this.supervisor.start();
+  }
+  async stop(): Promise<void> {
+    this.opened.clear();
+    await this.supervisor.stop();
+    await this.relay?.stop();
+  }
 
   private async ready(): Promise<void> {
     if (this.supervisor.state !== "ready") await this.supervisor.whenReady(this.readyWaitMs);
