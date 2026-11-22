@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <style>
+    .shield { fill: #1f4fd8; }
+    .envelope { stroke: #fff; }
+    @media (prefers-color-scheme: dark) {
+      .shield { fill: #7ba0ff; }
+      .envelope { stroke: #0d1118; }
+    }
+  </style>
+  <path class="shield" d="M12 2l8 3v6c0 5-3.4 9.2-8 11-4.6-1.8-8-6-8-11V5z"/>
+  <path class="envelope" d="M7.5 10.5l4.5 3 4.5-3M7.5 10.5h9v5h-9z" fill="none" stroke-width="1.4" stroke-linejoin="round"/>
+</svg>
