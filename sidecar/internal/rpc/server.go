@@ -378,6 +378,7 @@ func (s *Server) call(ctx context.Context, method string, raw json.RawMessage) (
 		if err := parseParams(raw, &p); err != nil {
 			return nil, err
 		}
+		s.cfg.Logf("cred fingerprint where=sidecar-recv mailbox=%s %s", p.MailboxID, credFingerprint(p.User, p.Pass))
 		if net.ParseIP(p.IP) == nil {
 			return nil, &engine.Error{Code: engine.CodeInvalidParams, Msg: "ip must be an IP address"}
 		}
@@ -605,4 +606,21 @@ func RSSBytes() int64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return int64(m.Sys)
+}
+
+// credFingerprint summarises a credential pair without revealing it.
+func credFingerprint(user, pass string) string {
+	sha8 := func(v string) string {
+		h := sha256.Sum256([]byte(v))
+		return fmt.Sprintf("%x", h[:4])
+	}
+	ascii := true
+	for i := 0; i < len(pass); i++ {
+		if pass[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	return fmt.Sprintf("user_len=%d user_sha=%s pass_len=%d pass_sha=%s user_trim=%t pass_trim=%t pass_ascii=%t",
+		len(user), sha8(user), len(pass), sha8(pass), user != strings.TrimSpace(user), pass != strings.TrimSpace(pass), ascii)
 }
