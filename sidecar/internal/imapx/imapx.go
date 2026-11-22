@@ -613,6 +613,18 @@ func numsOf(s imap.NumSet) []uint32 {
 	return out
 }
 
+// searchOptions returns the RETURN (ALL) options only when the server can
+// parse them (ESEARCH, RFC 4731, or IMAP4rev2). Without either a nil value
+// makes go-imap send a plain UID SEARCH; the classic "* SEARCH n n n" reply
+// then fills SearchData.All just the same.
+func searchOptions(c *imapclient.Client) *imap.SearchOptions {
+	caps := c.Caps()
+	if caps.Has(imap.CapESearch) || caps.Has(imap.CapIMAP4rev2) {
+		return &imap.SearchOptions{ReturnAll: true}
+	}
+	return nil
+}
+
 // SearchAll runs UID SEARCH ALL and reports the examined state.
 func (a *Account) SearchAll(ctx context.Context, folder string) (Selected, []uint32, error) {
 	var sel Selected
@@ -622,7 +634,7 @@ func (a *Account) SearchAll(ctx context.Context, folder string) (Selected, []uin
 		if sel, err = examine(c, folder); err != nil {
 			return err
 		}
-		d, err := c.UIDSearch(&imap.SearchCriteria{}, &imap.SearchOptions{ReturnAll: true}).Wait()
+		d, err := c.UIDSearch(&imap.SearchCriteria{}, searchOptions(c)).Wait()
 		if err != nil {
 			return err
 		}
@@ -644,7 +656,7 @@ func (a *Account) SearchText(ctx context.Context, folder, text string) (Selected
 		if sel, err = examine(c, folder); err != nil {
 			return err
 		}
-		d, err := c.UIDSearch(&imap.SearchCriteria{Text: []string{text}}, &imap.SearchOptions{ReturnAll: true}).Wait()
+		d, err := c.UIDSearch(&imap.SearchCriteria{Text: []string{text}}, searchOptions(c)).Wait()
 		if err != nil {
 			return err
 		}

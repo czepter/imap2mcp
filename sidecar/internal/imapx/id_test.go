@@ -103,6 +103,16 @@ func (s *rawServer) serve(c net.Conn, caps string) {
 				continue
 			}
 			fmt.Fprintf(c, "%s NO [AUTHENTICATIONFAILED] Login denied for fake reasons\r\n", tag)
+		case "CAPABILITY":
+			fmt.Fprintf(c, "* CAPABILITY IMAP4rev1 %s\r\n%s OK done\r\n", caps, tag)
+		case "SELECT", "EXAMINE":
+			fmt.Fprintf(c, "* 3 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n* OK [UIDNEXT 12] ok\r\n%s OK [READ-ONLY] selected\r\n", tag)
+		case "UID":
+			if len(f) > 2 && strings.EqualFold(f[2], "SEARCH") && !strings.Contains(strings.ToUpper(line), " RETURN ") {
+				fmt.Fprintf(c, "* SEARCH 4 9 11\r\n%s OK done\r\n", tag)
+			} else {
+				fmt.Fprintf(c, "%s BAD expected search-key instead of RETURN\r\n", tag)
+			}
 		case "LOGIN":
 			fmt.Fprintf(c, "%s NO [AUTHENTICATIONFAILED] Login denied for fake reasons\r\n", tag)
 		default:
@@ -276,5 +286,39 @@ func TestRelayLoginAndErrors(t *testing.T) {
 	}
 	if errors.Is(err, ErrAuth) || isAuthRejection(err) || b.AuthFailed() {
 		t.Fatalf("relay refusal must not count as auth failure: %v", err)
+	}
+}
+
+func TestSearchWithoutESearchSendsNoReturn(t *testing.T) {
+	s := newRawServer(t, "ID AUTH=PLAIN UIDPLUS")
+	s.okAll = true
+	host, portS, _ := net.SplitHostPort(s.ln.Addr().String())
+	var port int
+	fmt.Sscan(portS, &port)
+	cr := Creds{Host: "mail.example.test", IP: host, Port: port, User: "alice@example.test", Pass: "s3cret-pass"}
+	a := NewAccount(cr, func(sn string) *tls.Config { return &tls.Config{RootCAs: s.pool, ServerName: sn} })
+	defer a.Close()
+	want := []uint32{4, 9, 11}
+	_, got, err := a.SearchAll(context.Background(), "INBOX")
+	if err != nil || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("SearchAll = %v, %v", got, err)
+	}
+	_, got, err = a.SearchText(context.Background(), "INBOX", "needle")
+	if err != nil || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("SearchText = %v, %v", got, err)
+	}
+	n := 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.lines {
+		if strings.Contains(strings.ToUpper(l), "SEARCH") {
+			n++
+			if strings.Contains(strings.ToUpper(l), "RETURN") {
+				t.Errorf("RETURN sent: %s", l)
+			}
+		}
+	}
+	if n != 2 {
+		t.Errorf("saw %d SEARCH commands, want 2", n)
 	}
 }
