@@ -91,8 +91,11 @@ export function createMcpServer(ctx: TokenContext, opts: { requestId?: string } 
   server.registerTool("read_message", {
     title: "Read message",
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
-    description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. With the body you also get `attachments` (part, filename, contentType, approximate size); fetch one with get_attachment. Does not set \\Seen.",
-    inputSchema: { ref, include: z.array(z.enum(["headers", "body"])).min(1).max(2).optional().describe('Default: both') },
+    description: "Read headers and/or text body (capped at 200 KB, flag truncated) of one message; each part is subject to your permissions. A message with only an HTML body comes back as plain text (convertedFrom: \"text/html\"; links as <url>); pass html: \"raw\" for the markup. With the body you also get `attachments` (part, filename, contentType, approximate size); fetch one with get_attachment. Does not set \\Seen.",
+    inputSchema: {
+      ref, include: z.array(z.enum(["headers", "body"])).min(1).max(2).optional().describe('Default: both'),
+      html: z.enum(["text", "raw"]).optional().describe('HTML-only messages: "text" (default) converts to plain text, "raw" returns the HTML'),
+    },
   }, wrap("read_message", false, readMessageTool));
 
   server.registerTool("get_attachment", {

@@ -15,10 +15,13 @@ import { PolicyError, type TokenContext } from "../types.js";
 import { getBackend, type BodyResult, type Criteria, type FolderInfo, type Header, type ReadBackend } from "./backend.js";
 import { ToolError, isDefiniteRejection, normalizeError } from "./errors.js";
 import { assertMailboxUsable } from "./reliability.js";
+import { htmlToText } from "./htmlToText.js";
 
 export const MAX_PAGE = 50;
 export const MAX_BATCH = 25;
 export const MAX_BODY_BYTES = 200 * 1024;
+/** HTML-only bodies are fetched with more room: markup shrinks a lot once it is converted to text. */
+export const MAX_HTML_SOURCE_BYTES = 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 export interface MessageRef { mailbox: string; folder: string; uidValidity: number; uid: number }
@@ -371,7 +374,17 @@ function deniedRead(ctx: TokenContext, ref: MessageRef): never {
   throw new ToolError("NOT_FOUND", "Folder not found");
 }
 
-async function readMessageImpl(ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) {
+/** Cut to at most max UTF-8 bytes without splitting a character. */
+function clipUtf8(s: string, max: number): string {
+  let end = max;
+  const b = Buffer.from(s);
+  while (end > 0 && (b[end] & 0xc0) === 0x80) end--;
+  return b.subarray(0, end).toString("utf8");
+}
+
+export interface ReadMessageArgs { ref: MessageRef; include?: ("headers" | "body")[]; html?: "text" | "raw" }
+
+async function readMessageImpl(ctx: TokenContext, a: ReadMessageArgs) {
   const { ref } = a;
   auditNote({ mailboxId: ref.mailbox, folder: ref.folder, uidValidity: ref.uidValidity, uids: [ref.uid] });
   const want = new Set(a.include && a.include.length ? a.include : ["headers", "body"]);
@@ -392,7 +405,7 @@ async function readMessageImpl(ctx: TokenContext, a: { ref: MessageRef; include?
     if (!h) throw new ToolError("NOT_FOUND", "Message not found");
   }
   let bodyRes: BodyResult | undefined;
-  if (body) bodyRes = await b.fetchBody(ref.mailbox, ref.folder, ref.uidValidity, ref.uid, MAX_BODY_BYTES);
+  if (body) bodyRes = await b.fetchBody(ref.mailbox, ref.folder, ref.uidValidity, ref.uid, MAX_HTML_SOURCE_BYTES);
 
   // Recheck after the data arrived: revocation in the meantime withholds the corresponding part.
   const headersOut = headers && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers") ? h : undefined;
@@ -407,11 +420,18 @@ async function readMessageImpl(ctx: TokenContext, a: { ref: MessageRef; include?
     });
   }
   if (bodyOut) {
-    let text = bodyOut.text ?? bodyOut.html ?? "";
+    // The sidecar sends text: "" when there is no text/plain part, and a blank plain part next to an HTML one is
+    // common: both count as "no plain text". HTML-only mail then comes back as readable text unless the caller asks
+    // for the markup.
+    const plain = bodyOut.text?.trim() ? bodyOut.text : undefined;
+    const html = bodyOut.html?.trim() ? bodyOut.html : undefined;
+    const convert = !plain && !!html && a.html !== "raw";
+    let text = plain ?? (html && convert ? htmlToText(html) : html) ?? bodyOut.text ?? "";
     let truncated = bodyOut.truncated;
-    if (Buffer.byteLength(text) > MAX_BODY_BYTES) { text = Buffer.from(text).subarray(0, MAX_BODY_BYTES).toString("utf8"); truncated = true; }
+    if (Buffer.byteLength(text) > MAX_BODY_BYTES) { text = clipUtf8(text, MAX_BODY_BYTES); truncated = true; }
     Object.assign(out, {
-      bodyType: bodyOut.text ? "text/plain" : bodyOut.html ? "text/html" : null,
+      bodyType: plain || convert ? "text/plain" : html ? "text/html" : bodyOut.text !== undefined ? "text/plain" : null,
+      ...(convert ? { convertedFrom: "text/html" } : {}),
       body: text, truncated, attachments: bodyOut.attachments,
     });
   } else if (want.has("body")) {
@@ -748,7 +768,7 @@ async function setFlagsImpl(ctx: TokenContext, a: { refs: MessageRef[]; add?: st
 // Every upstream tool operation (including retries and reconciliation) must finish within 30 s in total.
 export const listFoldersTool = (ctx: TokenContext, a: { mailbox: string }) => withBudget(() => listFoldersImpl(ctx, a));
 export const searchMessagesTool = (ctx: TokenContext, a: SearchArgs) => withBudget(() => searchMessagesImpl(ctx, a));
-export const readMessageTool = (ctx: TokenContext, a: { ref: MessageRef; include?: ("headers" | "body")[] }) => withBudget(() => readMessageImpl(ctx, a));
+export const readMessageTool = (ctx: TokenContext, a: ReadMessageArgs) => withBudget(() => readMessageImpl(ctx, a));
 export const getAttachmentTool = (ctx: TokenContext, a: { ref: MessageRef; part: string }) => withBudget(() => getAttachmentImpl(ctx, a));
 export const createDraftTool = (ctx: TokenContext, a: DraftArgs) => withBudget(() => createDraftImpl(ctx, a));
 export const moveMessageTool = (ctx: TokenContext, a: { ref: MessageRef; destination: string }) => withBudget(() => moveMessageImpl(ctx, a));

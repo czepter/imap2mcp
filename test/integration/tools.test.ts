@@ -189,6 +189,35 @@ describe.skipIf(!haveOpenssl)("core tools", () => {
     });
   });
 
+  describe("HTML-only body", () => {
+    const html = "<html><head><style>td{color:red}</style></head><body><p>Ihre Rechnung</p>"
+      + "<table><tr><td>Betrag</td><td>1.234,56&nbsp;&euro;</td></tr></table></body></html>\r\n";
+    const add = () => {
+      const raw = "From: Shop <billing@shop.example>\r\nTo: alice@example.test\r\nSubject: Rechnung\r\nMIME-Version: 1.0\r\n"
+        + `Content-Type: text/html; charset=utf-8\r\n\r\n${html}`;
+      const m = s.fake.addMessage(ALICE, "INBOX", raw);
+      m.mime = {
+        bodystructure: `("TEXT" "HTML" ("CHARSET" "utf-8") NIL NIL "7BIT" ${html.length} 1 NIL NIL NIL NIL)`,
+        sections: { "1": Buffer.from(html) },
+      };
+      return refOf(s, ALICE, "INBOX", m.uid);
+    };
+
+    it("read_message converts it to plain text by default", async () => {
+      const r = await mcp.call("read_message", { ref: add(), include: ["body"] });
+      expect(r.isError).toBe(false);
+      expect(r.data).toMatchObject({ bodyType: "text/plain", convertedFrom: "text/html", truncated: false });
+      expect(r.data.body).toBe("Ihre Rechnung\n\nBetrag | 1.234,56 €");
+    });
+
+    it('html: "raw" returns the markup', async () => {
+      const r = await mcp.call("read_message", { ref: add(), include: ["body"], html: "raw" });
+      expect(r.data.bodyType).toBe("text/html");
+      expect(r.data.convertedFrom).toBeUndefined();
+      expect(r.data.body).toContain("<td>Betrag</td>");
+    });
+  });
+
   describe("create_draft", () => {
     it("appends to the configured Drafts folder, flagged \\Draft, and does not send", async () => {
       s.fake.clearLog();
