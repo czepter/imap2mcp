@@ -133,6 +133,29 @@ describe("parseSecurity: Authentication-Results", () => {
     expect(r.auth).toEqual({ spf: null, dkim: null, dmarc: null, dkimDomains: [], raw: [] });
   });
 
+  const M365 = "Authentication-Results: spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=a@x.example; dkim=pass (signature was verified) header.d=x.example; dmarc=pass action=none header.from=x.example; compauth=pass reason=100";
+
+  it("a header without authserv-id (Microsoft 365 style) keeps its first result", () => {
+    const r = parse(M365, "Received-SPF: fail (x) client-ip=1.2.3.4");
+    expect(r.auth).toMatchObject({ spf: "pass", dkim: "pass", dmarc: "pass", dkimDomains: ["x.example"] });
+    expect(r.auth.raw).toHaveLength(1);
+  });
+
+  it("a lower header with a real authserv-id is still ignored below an id-less one", () => {
+    const r = parse(
+      "Authentication-Results: spf=fail smtp.mailfrom=a@x.example; dkim=none",
+      "Authentication-Results: forged.example; spf=pass; dkim=pass header.d=bank.example; dmarc=pass",
+    );
+    expect(r.auth).toMatchObject({ spf: "fail", dkim: "none", dmarc: null, dkimDomains: [] });
+    expect(r.auth.raw).toHaveLength(1);
+  });
+
+  it("an id-less header below a real one is not used", () => {
+    const r = parse("Authentication-Results: mx.recv.example; dmarc=pass", "Authentication-Results: spf=pass");
+    expect(r.auth).toMatchObject({ dmarc: "pass", spf: null });
+    expect(r.auth.raw).toHaveLength(1);
+  });
+
   it("other methods are ignored", () => {
     const r = parse("Authentication-Results: mx.recv.example; arc=pass; iprev=pass policy.iprev=1.2.3.4; auth=pass");
     expect(r.auth).toMatchObject({ spf: null, dkim: null, dmarc: null });
@@ -199,6 +222,12 @@ describe("parseSecurity: sanitising and caps", () => {
     expect(r.returnPath).toContain("@x.example");
     expect(r.replyTo[0].name).toContain("Help");
     expect(r.auth.raw[0]).toContain("spf=pass");
+  });
+
+  it("strips the Arabic letter mark and the Unicode tag block", () => {
+    const bad = cp(0x061c, 0xe0001, 0xe0041, 0xe007f);
+    expect(sanitize(`a${bad}b`)).toBe("ab");
+    expect(JSON.stringify(parse(`X-Mailer: Mail${bad}er`))).not.toContain(cp(0xe0041));
   });
 
   it("tab becomes a space", () => {

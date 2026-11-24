@@ -38,7 +38,7 @@ const MAX_DKIM_DOMAINS = 10;
 
 // C0 (tab is turned into a space first), DEL, C1, line/paragraph separators, zero-width and bidi formatting characters.
 const STRIPPED: ReadonlyArray<readonly [number, number]> = [
-  [0x00, 0x08], [0x0a, 0x1f], [0x7f, 0x9f], [0x2028, 0x2029], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2064], [0x2066, 0x2069], [0xfeff, 0xfeff],
+  [0x00, 0x08], [0x0a, 0x1f], [0x7f, 0x9f], [0x2028, 0x2029], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2064], [0x2066, 0x2069], [0xfeff, 0xfeff], [0x061c, 0x061c], [0xe0000, 0xe007f],
 ];
 const isStripped = (cp: number): boolean => {
   for (const [lo, hi] of STRIPPED) if (cp >= lo && cp <= hi) return true;
@@ -175,10 +175,15 @@ function parseResult(seg: string): AuthResult | null {
   return { method: m[1].toLowerCase(), verdict: verdictOf(m[2]), props };
 }
 
+/** Stands in for the authserv-id of a header that has none (Microsoft 365 / Outlook.com): never equal to a real id. */
+const NO_ID = "\0none";
+
+/** Lowercased authserv-id; NO_ID when the header starts directly with a result (`spf=pass ...`); "" when unusable. */
 const authservId = (value: string): string => {
   const v = stripComments(value).trim();
   const end = v.search(/[;\s]/);
-  return (end < 0 ? v : v.slice(0, end)).toLowerCase();
+  const tok = end < 0 ? v : v.slice(0, end);
+  return tok.includes("=") ? NO_ID : tok.toLowerCase();
 };
 
 const DOMAIN = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
@@ -201,7 +206,8 @@ function parseAuth(arValues: string[], receivedSpf: string | undefined): Securit
       const r = sanitize(v, MAX_RAW_AR);
       if (r) auth.raw.push(r);
       const segs = splitSemicolons(stripComments(v));
-      for (let i = 1; i < segs.length; i++) {
+      // Segment 0 is `authserv-id [version]`, unless the header has no id and starts with a result.
+      for (let i = authservId(v) === NO_ID ? 0 : 1; i < segs.length; i++) {
         const res = parseResult(segs[i]);
         if (!res) continue;
         if (res.method === "spf") {
