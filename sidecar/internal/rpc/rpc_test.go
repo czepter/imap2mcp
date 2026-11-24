@@ -253,6 +253,36 @@ func TestEndToEndRPC(t *testing.T) {
 	if r.Error != nil || !strings.Contains(b.Text, "body of message 3") {
 		t.Fatalf("%+v %s", r.Error, r.Result)
 	}
+	// raw header block: base64 data, no body text, capped, stale and invalid params
+	r = c.call("fetchRawHeader", map[string]any{"mailboxId": "m1", "folder": "INBOX", "uidValidity": sync.UIDValidity, "uid": 3, "maxBytes": 4096})
+	var rh struct {
+		Data      []byte
+		Truncated bool
+	}
+	json.Unmarshal(r.Result, &rh)
+	if r.Error != nil || !strings.Contains(string(rh.Data), "Subject:") || strings.Contains(string(rh.Data), "body of message 3") || rh.Truncated {
+		t.Fatalf("%+v %s", r.Error, r.Result)
+	}
+	if !strings.Contains(string(r.Result), `"data":"`) {
+		t.Fatalf("data is not a base64 string: %s", r.Result)
+	}
+	r = c.call("fetchRawHeader", map[string]any{"mailboxId": "m1", "folder": "INBOX", "uidValidity": sync.UIDValidity, "uid": 3, "maxBytes": 20})
+	rh = struct {
+		Data      []byte
+		Truncated bool
+	}{}
+	json.Unmarshal(r.Result, &rh)
+	if r.Error != nil || !rh.Truncated || len(rh.Data) > 20 || len(rh.Data) == 0 {
+		t.Fatalf("%+v %s", r.Error, r.Result)
+	}
+	r = c.call("fetchRawHeader", map[string]any{"mailboxId": "m1", "folder": "INBOX", "uidValidity": sync.UIDValidity + 1, "uid": 3})
+	if r.Error == nil || r.Error.Code != engine.CodeStaleRef {
+		t.Fatalf("%+v", r)
+	}
+	r = c.call("fetchRawHeader", map[string]any{"mailboxId": "m1"})
+	if r.Error == nil || r.Error.Code != engine.CodeInvalidParams {
+		t.Fatalf("%+v", r)
+	}
 	r = c.call("searchText", map[string]any{"mailboxId": "m1", "folder": "INBOX", "text": "message 12", "limit": 10})
 	var st struct{ UIDs []uint32 }
 	json.Unmarshal(r.Result, &st)

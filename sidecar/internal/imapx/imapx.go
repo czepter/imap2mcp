@@ -870,6 +870,52 @@ func (a *Account) FetchPart(ctx context.Context, folder string, uid uint32, part
 	return rp, nil
 }
 
+// RawHeader is the (possibly truncated) RFC 5322 header block of one message.
+type RawHeader struct {
+	Selected  Selected
+	Bytes     []byte
+	Found     bool
+	Truncated bool
+}
+
+// FetchHeaderBlock runs UID FETCH uid (BODY.PEEK[HEADER]<0.max>). Nothing else
+// is requested: no structure, no size, no flags.
+func (a *Account) FetchHeaderBlock(ctx context.Context, folder string, uid uint32, max int64) (RawHeader, error) {
+	var rh RawHeader
+	err := a.with(ctx, func(c *imapclient.Client) error {
+		var err error
+		rh = RawHeader{}
+		if rh.Selected, err = examine(c, folder); err != nil {
+			return err
+		}
+		sec := &imap.FetchItemBodySection{Peek: true, Specifier: imap.PartSpecifierHeader}
+		if max > 0 {
+			sec.Partial = &imap.SectionPartial{Offset: 0, Size: max}
+		}
+		msgs, err := c.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+			UID: true, BodySection: []*imap.FetchItemBodySection{sec},
+		}).Collect()
+		if err != nil {
+			return err
+		}
+		for _, m := range msgs {
+			if uint32(m.UID) != uid {
+				continue
+			}
+			rh.Found = true
+			if len(m.BodySection) > 0 {
+				rh.Bytes = m.BodySection[0].Bytes
+			}
+			rh.Truncated = max > 0 && int64(len(rh.Bytes)) >= max
+		}
+		return nil
+	})
+	if err != nil {
+		return RawHeader{}, err
+	}
+	return rh, nil
+}
+
 // clientID is what the sidecar tells servers about itself: nothing about the
 // user, the mailbox or the host it connects to.
 var clientID = &imap.IDData{Name: "imap2mcp", Version: "1", Vendor: "imap2mcp"}

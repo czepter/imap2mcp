@@ -8,6 +8,7 @@ const rl = createInterface({ input: process.stdin });
 const startedAt = Date.now();
 const opened = new Map(); // mailboxId -> open params
 const invalidated = [];
+let lastRawHeader = null;
 let secret = null;
 
 function leak() {
@@ -24,7 +25,14 @@ function handle(method, p) {
     case "listFolders":
       if (!opened.has(p.mailboxId)) throw { code: -32002, message: "unknown mailbox" };
       return { folders: [{ path: "INBOX", delimiter: "/", flags: [] }] };
-    case "debug.state": return { opened: [...opened.keys()], openParams: Object.fromEntries(opened), invalidated, leak: leak(), pid: process.pid };
+    case "fetchRawHeader": {
+      if (!opened.has(p.mailboxId)) throw { code: -32002, message: "unknown mailbox" };
+      lastRawHeader = { folder: p.folder, uidValidity: p.uidValidity, uid: p.uid, maxBytes: p.maxBytes };
+      if (p.uid === 99) throw { code: -32010, message: "message no longer exists" };
+      if (p.uid === 2) return { data: Buffer.alloc(p.maxBytes, "X").toString("base64"), truncated: true };
+      return { data: Buffer.from("Subject: gr\u00fc\u00dfe\r\nAuthentication-Results: mx.recv.example; spf=pass\r\n\r\n", "utf8").toString("base64"), truncated: false };
+    }
+    case "debug.state": return { opened: [...opened.keys()], openParams: Object.fromEntries(opened), invalidated, lastRawHeader, leak: leak(), pid: process.pid };
     case "debug.forget": opened.clear(); return { ok: true };
     case "debug.crash": setTimeout(() => process.exit(3), 10); return { ok: true };
     case "debug.hang": return new Promise(() => {});

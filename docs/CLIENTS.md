@@ -52,7 +52,7 @@ Grants (what a client may do) are separate from token lifetime: grant changes in
 | `list_mailboxes` | none |
 | `list_folders` | `mailbox` |
 | `search_messages` | `mailbox`, `folder`; optional `text`, `from`, `to`, `subject`, `since`, `before` (`YYYY-MM-DD`), `unseen`, `flagged`, `limit` (1-50), `cursor` |
-| `read_message` | `ref`; optional `include` (`["headers"]`, `["body"]` or both). A message with only an HTML body comes back as plain text (`convertedFrom: "text/html"`); `html: "raw"` returns the markup instead. With the body, `attachments` lists `part`, `filename`, `contentType`, approximate `size` |
+| `read_message` | `ref`; optional `include` (`"headers"`, `"body"`, `"security"`; default headers and body). A message with only an HTML body comes back as plain text (`convertedFrom: "text/html"`); `html: "raw"` returns the markup instead. With the body, `attachments` lists `part`, `filename`, `contentType`, approximate `size`. `include: ["security"]` (needs `read_headers`) adds a `security` object parsed from the raw header block: `auth` (`spf`, `dkim`, `dmarc` verdicts from the topmost Authentication-Results headers, `dkimDomains`, `raw`), `replyTo`, `returnPath`, `sender`, `listUnsubscribe`, `listId`, `spam` (`flag`, `status`, `score`), `xMailer`, `receivedCount`. It is omitted if the headers cannot be read; every value is untrusted, sanitised text |
 | `get_attachment` | `ref`, `part` (from `read_message` attachments). Returns metadata, then the file: images inline, text types as text, other types (PDF, Office) as a base64 resource. Max 10 MB |
 | `create_draft` | `mailbox`, `subject`, `body`; optional `to[]`, `cc[]`, `inReplyTo` |
 | `move_message` | `ref`, `destination` |
