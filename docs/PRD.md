@@ -89,7 +89,7 @@ In v0–v2, the owner and administrator may be the same person. An MCP client id
 | ID | Requirement | MoSCoW | Target |
 |---|---|---|---|
 | FR-01 | Expose MCP through Streamable HTTP; support initialization, tool discovery, and authenticated tool calls with documented schemas and structured errors. | Must | v0 |
-| FR-02 | Provide an OAuth 2.1 authorization-server role for MCP clients: authorization code with PKCE, consent, discovery/resource metadata needed by supported clients, short-lived audience-bound access tokens, expiration, and revocation. Reject Basic auth and pre-shared static tokens. | Must | v0 |
+| FR-02 | Provide an OAuth 2.1 authorization-server role for MCP clients: authorization code with PKCE, consent, discovery/resource metadata needed by supported clients, short-lived audience-bound access tokens, expiration, and revocation. Reject Basic auth and pre-shared static tokens. (Later amended: the owner may issue expiring, revocable API tokens from the admin UI for clients without OAuth; see `docs/CLIENTS.md`.) | Must | v0 |
 | FR-03 | Permit controlled client registration and management. Explicitly document supported clients and whether registration is admin-provisioned or dynamic; registration alone grants no mail access. | Must | v0 |
 | FR-04 | Provide a protected minimal UI to add/edit/remove mailbox configuration, test connection, select Drafts folder, and report actionable status without returning saved secrets. Removing configuration does not delete remote mail. | Must | v0 |
 | FR-05 | Manage default-deny grants keyed by client and mailbox, using read/draft/organize presets; permit later reductions, revocation, and explicit owner-approved increases within the consent rules in Section 10. | Must | v0 |

@@ -67,6 +67,7 @@ Conventions
 | `POST /api/clients/:id/rules` | `{ mailboxId, folder, operation, effect }` | `Rule` (201) |
 | `DELETE /api/clients/:id/rules/:ruleId` | | 204 |
 | `POST /api/clients/:id/disable` / `enable` / `revoke` | | 204. `disable` and `revoke` also revoke all tokens. `revoke` also removes all rules |
+| `POST /api/tokens` | `{ name, expiresInDays: 7\|30\|90\|365, grants: {mailboxId, capability}[] (min. 1) }` | 201 `{ secret, token: TokenSummary }`. Creates an API token with its own client; `secret` is returned only here. 400 `validation` |
 | `GET /api/tokens/:id` | | `TokenDetail` `{ token: TokenSummary, client, mailboxes (per-capability grants of the client), otherActiveTokenCount }`. 404 unless live |
 | `PATCH /api/tokens/:id` | `{ capabilities: Capability[] (min. 1), grants: {mailboxId, capability}[] }` | 200 `TokenDetail`. Sets the token's scope ceiling and the client's complete grant set in one transaction. 400 `validation`, 404 |
 | `POST /api/tokens/:id/revoke` | | 204 |
@@ -79,7 +80,7 @@ Behaviour for every mutation is exactly what `src/web/routes.ts`, `src/oauth/aut
 
 ## SPA routes
 
-`/setup`, `/login`, `/` (redirects to `/dashboard`), `/dashboard`, `/mailboxes`, `/mailboxes/new`, `/mailboxes/:id`, `/clients`, `/clients/:id`, `/tokens`, `/tokens/:id`, `/audit`, `/oauth/authorize`. A global route middleware calls `GET /api/session` once and redirects: setup needed to `/setup`, signed out to `/login?returnTo=...`, signed in on `/login` or `/setup` to `/dashboard`. After sign-in go to `returnTo` when it is a same-site path. Confirmations that were separate pages (disable client, revoke token, delete mailbox) become dialogs.
+`/setup`, `/login`, `/` (redirects to `/dashboard`), `/dashboard`, `/mailboxes`, `/mailboxes/new`, `/mailboxes/:id`, `/clients`, `/clients/:id`, `/tokens`, `/tokens/new`, `/tokens/:id`, `/audit`, `/oauth/authorize`. A global route middleware calls `GET /api/session` once and redirects: setup needed to `/setup`, signed out to `/login?returnTo=...`, signed in on `/login` or `/setup` to `/dashboard`. After sign-in go to `returnTo` when it is a same-site path. Confirmations that were separate pages (disable client, revoke token, delete mailbox) become dialogs.
 
 ## Security (must hold after the migration)
 

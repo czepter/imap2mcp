@@ -4,7 +4,7 @@ import { config } from "../core/config.js";
 import { listMailboxes } from "../core/imap/mailboxes.js";
 import { CAPABILITIES, scopesToCaps } from "../core/oauth/common.js";
 import { OPERATIONS, OP_CAPABILITY, PRESET_OPS, capabilityRows, isValidSelector, listRules, presetActive, type RuleRow } from "../core/policy/rules.js";
-import { clientDisplayName, isoTs, getClientRow, parseRedirectUris, toClientSummary, type ClientRow } from "./dto-common";
+import { clientDisplayName, clientKind, deadApiClientIds, isoTs, getClientRow, parseRedirectUris, toClientSummary, type ClientRow } from "./dto-common";
 import { mailboxStatusOf, toMailboxDto } from "./dto-mailbox";
 
 /** The old "What each capability allows" table. */
@@ -37,8 +37,10 @@ export function tokenReach(
 export function buildOverview(): Overview {
   const db = getDb();
   const mailboxes = listMailboxes();
-  const clients = db.prepare("SELECT client_id, client_name, redirect_uris, disabled, created_at FROM oauth_clients ORDER BY created_at DESC").all() as ClientRow[];
-  const grantRows = capabilityRows(db);
+  const dead = deadApiClientIds();
+  const clients = (db.prepare("SELECT client_id, client_name, redirect_uris, disabled, created_at FROM oauth_clients ORDER BY created_at DESC").all() as ClientRow[])
+    .filter((c) => !dead.has(c.client_id));
+  const grantRows = capabilityRows(db).filter((g) => !dead.has(g.client_id));
   const granted = new Map<string, Set<string>>(); // `${client}:${mailbox}` -> caps
   for (const g of grantRows) {
     const k = `${g.client_id}:${g.mailbox_id}`;
@@ -47,11 +49,11 @@ export function buildOverview(): Overview {
   }
   const now = new Date().toISOString();
   const tokens = db.prepare(
-    `SELECT t.id, t.client_id, t.scopes, t.expires_at, t.created_at, c.client_name
+    `SELECT t.id, t.client_id, t.scopes, t.expires_at, t.created_at, c.client_name, c.redirect_uris
        FROM oauth_tokens t JOIN oauth_clients c ON c.client_id = t.client_id
       WHERE t.revoked = 0 AND (t.expires_at > ? OR (t.refresh_expires_at IS NOT NULL AND t.refresh_expires_at > ?))
       ORDER BY t.created_at DESC`,
-  ).all(now, now) as { id: string; client_id: string; scopes: string; expires_at: string; created_at: string; client_name: string | null }[];
+  ).all(now, now) as { id: string; client_id: string; scopes: string; expires_at: string; created_at: string; client_name: string | null; redirect_uris: string }[];
 
   const clientCount = (mid: string) => new Set(grantRows.filter((g) => g.mailbox_id === mid).map((g) => g.client_id)).size;
   const grants: Grant[] = grantRows.map((g) => ({ clientId: g.client_id, mailboxId: g.mailbox_id, capability: g.capability }));
@@ -64,6 +66,7 @@ export function buildOverview(): Overview {
       id: t.id,
       clientId: t.client_id,
       clientName: t.client_name || t.client_id, // the old token table fell back to the id, not "(unnamed)"
+      kind: clientKind(t.redirect_uris),
       reach: tokenReach(t.scopes, t.client_id, mailboxes, granted),
       scopes: scopesToCaps(t.scopes),
       createdAt: isoTs(t.created_at),
@@ -103,6 +106,7 @@ export function buildTokenDetail(t: LiveTokenRow): TokenDetail {
       id: t.id,
       clientId: t.client_id,
       clientName: client.client_name || t.client_id,
+      kind: clientKind(client.redirect_uris),
       reach: tokenReach(t.scopes, t.client_id, mailboxes, granted),
       scopes: scopesToCaps(t.scopes),
       createdAt: isoTs(t.created_at),

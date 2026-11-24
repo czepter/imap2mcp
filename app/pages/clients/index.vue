@@ -71,6 +71,7 @@ async function enableClient(clientId: string) {
           <TableRow v-for="c in clients" :key="c.clientId">
             <TableHead scope="row">
               <span class="font-semibold">{{ c.clientName || "(unnamed)" }}</span>
+              <Pill v-if="c.kind === 'api'" tone="neutral" class="ml-1.5">API token</Pill>
               <Pill v-if="c.disabled" tone="off" class="ml-1.5">disabled</Pill>
               <div class="text-muted-foreground font-mono text-xs font-normal break-all">{{ c.clientId }}</div>
             </TableHead>

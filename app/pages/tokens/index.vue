@@ -17,9 +17,10 @@ function toggleRevoke(t: TokenSummary) {
 }
 function revokeText(t: TokenSummary): string {
   const name = t.clientName || t.clientId;
-  if (!t.reach.length) return ` ${name} has no access left through this token; revoking removes it. It can ask you to authorize again.`;
+  const after = t.kind === "api" ? "Anything using it stops working; you cannot restore it." : "It can ask you to authorize again.";
+  if (!t.reach.length) return ` ${name} has no access left through this token; revoking removes it. ${after}`;
   const parts = t.reach.map((r) => `${joinList(sortCapabilities(r.capabilities))} on ${r.mailboxLabel}`);
-  return ` ${name} loses ${joinList(parts)} right now. It can ask you to authorize again.`;
+  return ` ${name} loses ${joinList(parts)} right now. ${after}`;
 }
 async function revokeToken(t: TokenSummary) {
   revoking.value = true;
@@ -39,7 +40,9 @@ async function revokeToken(t: TokenSummary) {
 
 <template>
   <div>
-    <PageHeader title="Tokens" description="The access tokens clients hold right now." />
+    <PageHeader title="Tokens" description="The access tokens clients hold right now.">
+      <Button as-child><NuxtLink to="/tokens/new">Create API token</NuxtLink></Button>
+    </PageHeader>
 
     <ErrorAlert v-if="error && !data" :error="error" title="Could not load the tokens">
       <template #actions>
@@ -61,7 +64,7 @@ async function revokeToken(t: TokenSummary) {
             <TableHead scope="col">Client</TableHead>
             <TableHead scope="col">Can reach</TableHead>
             <TableHead scope="col">Issued</TableHead>
-            <TableHead scope="col">Access token expires</TableHead>
+            <TableHead scope="col">Expires</TableHead>
             <TableHead scope="col"><span class="sr-only">Actions</span></TableHead>
           </TableRow>
         </TableHeader>
@@ -70,6 +73,7 @@ async function revokeToken(t: TokenSummary) {
             <TableRow>
               <TableCell class="max-w-56 font-semibold break-words">
                 <NuxtLink :to="`/clients/${encodeURIComponent(t.clientId)}`" class="hover:underline">{{ t.clientName || t.clientId }}</NuxtLink>
+                <Pill v-if="t.kind === 'api'" tone="neutral" class="ml-1.5">API token</Pill>
               </TableCell>
               <TableCell>
                 <template v-if="t.reach.length">

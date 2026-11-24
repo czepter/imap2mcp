@@ -92,7 +92,7 @@ Backups and the `backups/` directory contain the access audit (message identifie
 - Remove a mailbox: **Mailbox -> Delete** (a confirmation dialog asks you to type the mailbox label). Grants cascade; mail on the server is untouched.
 - Rotating the IMAP password at the provider: edit the mailbox and enter the new password (leave empty to keep the old one). Changing host, port or username clears the Drafts folder selection.
 
-Token lifetimes: access 1 hour, refresh 30 days, authorization code 10 minutes.
+Token lifetimes: access 1 hour, refresh 30 days, authorization code 10 minutes. API tokens created in the UI last 7, 30, 90 or 365 days and cannot be renewed, so plan to replace them before they expire. Changing `BASE_URL` invalidates them too.
 
 ## Logs and audit
 

@@ -167,7 +167,7 @@ async function revoke() {
         <template #description>
           <span class="text-[13px]">
             Client <NuxtLink :to="`/clients/${encodeURIComponent(detail.client.clientId)}`" class="underline">{{ name }}</NuxtLink>
-            &middot; issued {{ formatIssued(detail.token.createdAt) }} &middot; access token expires {{ formatExpires(detail.token.expiresAt) }}
+            &middot; issued {{ formatIssued(detail.token.createdAt) }} &middot; {{ detail.token.kind === "api" ? "API token" : "access token" }} expires {{ formatExpires(detail.token.expiresAt) }}
           </span>
         </template>
         <Button variant="outline" class="btn-d" @click="revokeOpen = true">Revoke token</Button>
@@ -228,7 +228,7 @@ async function revoke() {
       <ConfirmDialog
         v-model:open="revokeOpen"
         :title="`Revoke ${name}'s token?`"
-        description="This takes effect at the next call. The client can ask you to authorize again."
+        :description="detail.token.kind === 'api' ? 'This takes effect at the next call. Anything using the token stops working; you cannot restore it.' : 'This takes effect at the next call. The client can ask you to authorize again.'"
         confirm-label="Revoke token"
         destructive
         :pending="revoking"

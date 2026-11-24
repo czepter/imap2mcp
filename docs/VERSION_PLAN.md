@@ -22,7 +22,7 @@ A self-hosted, open-source bridge that lets MCP clients read and organize IMAP m
 
 ### Acceptance criteria
 
-1. Transport and OAuth: an MCP client completes an OAuth authorization-code flow with PKCE and calls tools over Streamable HTTP; missing, expired, wrong-audience, or invalid tokens are rejected. HTTP Basic auth and pre-shared static API tokens cannot authorize MCP requests.
+1. Transport and OAuth: an MCP client completes an OAuth authorization-code flow with PKCE and calls tools over Streamable HTTP; missing, expired, wrong-audience, or invalid tokens are rejected. HTTP Basic auth and pre-shared static API tokens cannot authorize MCP requests. (Later amended: owner-issued, expiring API tokens were added after v2; see `docs/CLIENTS.md`.)
 
 2. Mailbox setup: an administrator adds a TLS-enabled IMAP mailbox, tests connectivity, saves it, and reconnects after a restart through the minimal UI; certificate validation is enabled and no saved secret is displayed back.
 

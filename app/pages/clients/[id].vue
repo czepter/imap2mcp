@@ -47,6 +47,8 @@ async function load(opts: { keepDraft?: boolean } = {}) {
 watch(id, () => { loading.value = true; detail.value = null; notFound.value = false; loadError.value = ""; load(); }, { immediate: true });
 
 const name = computed(() => detail.value?.client.clientName || "(unnamed)");
+/** The client behind an API token: revoking the token is the only way to end it, and it has no redirect URIs. */
+const isApiToken = computed(() => detail.value?.client.kind === "api");
 useHead({ title: computed(() => (detail.value ? `${name.value} · Client` : "Client")) });
 useBreadcrumbs(() => [{ label: "Clients", to: "/clients" }, { label: detail.value ? name.value : "Client" }]);
 
@@ -180,11 +182,17 @@ watch([disableOpen, revokeOpen], () => { dialogError.value = ""; });
         <Button v-if="detail.client.disabled" :disabled="enabling" @click="enable">
           {{ enabling ? "Enabling…" : "Enable client" }}
         </Button>
-        <Button v-else variant="outline" class="btn-d" @click="disableOpen = true">Disable client</Button>
+        <Button v-else-if="!isApiToken" variant="outline" class="btn-d" @click="disableOpen = true">Disable client</Button>
       </PageHeader>
 
       <div class="grid gap-5">
         <ErrorAlert :error="actionError" />
+        <Notice v-if="isApiToken && !detail.activeTokenCount" kind="warn">
+          This API token was revoked. Nothing can use these grants any more.
+        </Notice>
+        <p v-else-if="isApiToken" class="text-muted-foreground text-[13px]">
+          This client belongs to an API token. To end its access, revoke the token under <NuxtLink to="/tokens" class="underline">Tokens</NuxtLink>.
+        </p>
         <Notice v-if="detail.client.disabled" kind="warn">
           This client is disabled. Its tokens are revoked and it cannot authorize again until you enable it. Grants are kept.
         </Notice>
@@ -235,14 +243,14 @@ watch([disableOpen, revokeOpen], () => { dialogError.value = ""; });
         </SectionCard>
 
         <!-- Redirect URIs -->
-        <SectionCard id="uris" title="Redirect URIs" padded>
+        <SectionCard v-if="!isApiToken" id="uris" title="Redirect URIs" padded>
           <ul class="grid gap-1 font-mono text-xs break-all">
             <li v-for="u in detail.client.redirectUris" :key="u">{{ u }}</li>
           </ul>
         </SectionCard>
 
         <!-- Danger zone -->
-        <SectionCard id="revoke" title="Revoke client" danger padded>
+        <SectionCard v-if="!isApiToken" id="revoke" title="Revoke client" danger padded>
           <p>Removes every rule and revokes all tokens. IMAP credentials are not changed.</p>
           <Button variant="destructive" class="mt-3.5" @click="revokeOpen = true">Revoke client</Button>
         </SectionCard>
