@@ -9,6 +9,8 @@ export type Effect = "allow" | "deny";
 export type RegistrationMode = "dynamic" | "admin";
 export type MailboxStatusValue = "ok" | "degraded" | "auth_failed" | "unknown";
 export type AuditOutcome = "ok" | "denied" | "failed" | "unknown_outcome";
+/** "api": the client behind an API token created in the admin UI (no redirect URIs, no OAuth flow). */
+export type ClientKind = "oauth" | "api";
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
@@ -71,6 +73,7 @@ export interface ClientSummary {
   clientName: string;
   createdAt: string;
   disabled: boolean;
+  kind: ClientKind;
 }
 
 export interface Grant { clientId: string; mailboxId: string; capability: Capability }
@@ -79,6 +82,7 @@ export interface TokenSummary {
   id: string;
   clientId: string;
   clientName: string;
+  kind: ClientKind;
   /** Capabilities the token could use right now: scope ceiling intersected with live grants, per mailbox. */
   reach: { mailboxId: string; mailboxLabel: string; capabilities: Capability[] }[];
   /** The capability ceiling of the token (its scopes), independent of the grants. */
@@ -101,6 +105,22 @@ export interface TokenUpdate {
   capabilities: Capability[];
   /** The complete desired preset set of the client (same semantics as PUT /api/clients/:id/grants). */
   grants: GrantsUpdate["grants"];
+}
+
+export const API_TOKEN_EXPIRY_DAYS = [7, 30, 90, 365] as const;
+export type ApiTokenExpiryDays = (typeof API_TOKEN_EXPIRY_DAYS)[number];
+
+export interface ApiTokenCreate {
+  name: string;
+  expiresInDays: ApiTokenExpiryDays;
+  /** At least one; the token's capability ceiling is the union of these. */
+  grants: GrantsUpdate["grants"];
+}
+
+/** The only response that ever carries a token secret. */
+export interface ApiTokenCreated {
+  secret: string;
+  token: TokenSummary;
 }
 
 export interface Overview {

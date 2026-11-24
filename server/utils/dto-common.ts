@@ -1,4 +1,4 @@
-import type { Capability, ClientSummary } from "../../shared/types/api";
+import type { Capability, ClientKind, ClientSummary } from "../../shared/types/api";
 import { getDb } from "../core/db/database.js";
 
 /**
@@ -28,7 +28,26 @@ export function getClientRow(clientId: string): ClientRow | undefined {
 export const clientDisplayName = (name: string | null): string => name || "(unnamed)";
 
 export function toClientSummary(c: ClientRow): ClientSummary {
-  return { clientId: c.client_id, clientName: clientDisplayName(c.client_name), createdAt: isoTs(c.created_at), disabled: !!c.disabled };
+  return { clientId: c.client_id, clientName: clientDisplayName(c.client_name), createdAt: isoTs(c.created_at), disabled: !!c.disabled, kind: clientKind(c.redirect_uris) };
+}
+
+/**
+ * OAuth registration (dynamic or by the admin) requires at least one redirect URI, so a client without any can only
+ * be the one behind an API token. It also means such a client can never start an authorization request.
+ */
+export const clientKind = (redirectUrisRaw: string): ClientKind => (parseRedirectUris(redirectUrisRaw).length ? "oauth" : "api");
+
+/**
+ * API-token clients whose token was revoked or has expired. Nothing can ever act as them again, so lists and reach
+ * counts leave them out; the row stays so that audit entries keep pointing at a client.
+ */
+export function deadApiClientIds(): Set<string> {
+  const rows = getDb().prepare(
+    `SELECT c.client_id FROM oauth_clients c
+      WHERE c.redirect_uris = '[]' AND NOT EXISTS (
+        SELECT 1 FROM oauth_tokens t WHERE t.client_id = c.client_id AND t.revoked = 0 AND t.expires_at > ?)`,
+  ).all(new Date().toISOString()) as { client_id: string }[];
+  return new Set(rows.map((r) => r.client_id));
 }
 
 export function parseRedirectUris(raw: string): string[] {

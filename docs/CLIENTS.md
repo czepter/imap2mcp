@@ -24,7 +24,18 @@ Claude.ai / Claude Desktop / Claude Code, ChatGPT, Cursor, VS Code, MCP Inspecto
 - Redirect URIs must be `https://...` or `http://localhost|127.0.0.1...`, without fragment, and must match the registered value exactly.
 - `resource`, if sent, must equal `${BASE_URL}/mcp` (RFC 8707); if omitted it defaults to that value.
 - Scopes: `mail:read`, `mail:draft`, `mail:organize`. If none is requested, all three are requested. The consent screen shows only the requested scopes; the token carries only the scopes for which the owner ticked at least one mailbox.
-- Static tokens, API keys, HTTP Basic auth and cookies cannot authorize `/mcp`.
+- Pre-shared secrets, API-key headers, HTTP Basic auth and cookies cannot authorize `/mcp`. A client that cannot do OAuth can use an API token (below).
+
+## API tokens (clients without OAuth)
+
+Create one in the admin UI under **Tokens -> Create API token**, then configure the client with the URL `${BASE_URL}/mcp` and the header `Authorization: Bearer <token>`. The token starts with `i2m_`, is shown once and only its SHA-256 is stored. There is no refresh token: when it expires, create a new one. This works in both registration modes.
+
+Each API token has its own client entry (marked **API token** under **Clients**), so its grants and folder rules affect no other token, and the audit log tells it apart. Revoke it under **Tokens**. After revocation or expiry the entry leaves the lists; the record is kept for the audit log. It has no redirect URIs, so it cannot start an OAuth authorization.
+
+```bash
+curl -s -X POST $B/mcp -H "authorization: Bearer $API_TOKEN" -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
 
 ## Registration modes (`REGISTRATION_MODE`)
 
@@ -41,6 +52,7 @@ Dynamic registration is unauthenticated by nature (RFC 7591). The record is iner
 |---|---|---|
 | Authorization code | 10 minutes | Single use; second use is refused. |
 | Access token | 1 hour (`expires_in: 3600`) | Opaque, 43 base64url characters; only its SHA-256 is stored. Expired, revoked or wrong-audience tokens get 401. |
+| API token | 7, 30, 90 or 365 days, chosen at creation | Created by the owner in the UI. No refresh. Revoked, expired or wrong-audience tokens get 401. |
 | Refresh token | 30 days | Rotated on every use; the previous access token stops working at rotation. Presenting an already-used refresh token is refused and revokes the lineage, so a client that retries a lost refresh response must re-authorize. A refresh cannot request a scope that was not consented. |
 
 Grants (what a client may do) are separate from token lifetime: grant changes in the UI apply to the next tool call of any live token. A grant added after consent never widens an existing token; the client must authorize again to obtain the extra scope.

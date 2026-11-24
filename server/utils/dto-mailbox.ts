@@ -5,7 +5,7 @@ import { retryMailbox } from "../core/sidecar/index.js";
 import type { Mailbox as MailboxRow } from "../core/imap/mailboxes.js";
 import { CAPABILITIES } from "../core/oauth/common.js";
 import { capabilityRows } from "../core/policy/rules.js";
-import { trimmedString, clientDisplayName, isoTs } from "./dto-common";
+import { trimmedString, clientDisplayName, isoTs, deadApiClientIds } from "./dto-common";
 
 export function toMailboxDto(m: MailboxRow): Mailbox {
   return { id: m.id, label: m.label, host: m.imap_host, port: m.imap_port, username: m.imap_username, draftsFolder: m.drafts_folder, createdAt: isoTs(m.created_at) };
@@ -47,7 +47,9 @@ export function parseMailboxBody(b: Record<string, unknown>): { label: string; h
 export function mailboxReach(mailboxId: string): { clientId: string; clientName: string; capabilities: Capability[] }[] {
   const db = getDb();
   const byClient = new Map<string, Set<string>>();
+  const dead = deadApiClientIds();
   for (const r of capabilityRows(db, { mailboxId })) {
+    if (dead.has(r.client_id)) continue;
     if (!byClient.has(r.client_id)) byClient.set(r.client_id, new Set());
     byClient.get(r.client_id)!.add(r.capability);
   }

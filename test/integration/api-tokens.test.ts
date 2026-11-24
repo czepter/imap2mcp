@@ -5,9 +5,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
 import { makeSelfSignedCert } from "../helpers/certs.js";
-import { errorOf, json } from "../helpers/http.js";
+import { Browser, errorOf, json } from "../helpers/http.js";
 import { Mcp, obtainToken, rawMcp, setGrants, sha256hex, type Stack, createStack } from "../helpers/stack.js";
-import type { Overview, TokenDetail } from "../../shared/types/api.js";
+import type { ApiTokenCreated, ClientDetail, MailboxDetail, Overview, TokenDetail } from "../../shared/types/api.js";
 
 const haveOpenssl = !!makeSelfSignedCert();
 const ALICE = "alice@example.test";
@@ -106,6 +106,110 @@ describe.skipIf(!haveOpenssl)("token admin API", () => {
     const r = await s.admin.req("PATCH", `/api/tokens/${tokenId(tokens.access_token)}`, { json: { capabilities: ["read"], grants: [] } });
     expect(r.status).toBe(403);
     expect((await errorOf(r)).code).toBe("csrf");
+  });
+
+  describe("API tokens created in the admin UI", () => {
+    const create = (body: unknown) => s.admin.postWithCsrf("/api/tokens", body);
+    const make = async (...g: Array<[string, string]>) => {
+      const r = await create({ name: "cron-script", expiresInDays: 30, grants: grants(...g) });
+      expect(r.status).toBe(201);
+      return json<ApiTokenCreated>(r);
+    };
+    const overview = async () => json<Overview>(await s.admin.get("/api/overview"));
+
+    it("returns the secret once, stores only its hash, and the token works on /mcp within its grants", async () => {
+      const { secret, token } = await make([A, "read"]);
+      expect(secret).toMatch(/^i2m_[A-Za-z0-9_-]{43}$/);
+      expect(token).toMatchObject({ clientName: "cron-script", kind: "api", scopes: ["read"] });
+      const days = (new Date(token.expiresAt).getTime() - Date.now()) / 86_400_000;
+      expect(days).toBeGreaterThan(29.9);
+      expect(days).toBeLessThanOrEqual(30);
+
+      const row = s.srv.db().prepare("SELECT * FROM oauth_tokens WHERE id = ?").get(token.id) as any;
+      expect(row.token_hash).toBe(sha256hex(secret));
+      expect(row.refresh_hash).toBeNull();
+      expect(JSON.stringify(row)).not.toContain(secret);
+      for (const path of ["/api/overview", `/api/tokens/${token.id}`, `/api/clients/${token.clientId}`]) {
+        expect(await (await s.admin.get(path)).text(), path).not.toContain(secret);
+      }
+
+      const mcp = await new Mcp(s.base, secret).connect();
+      try {
+        expect((await mcp.call("search_messages", { mailbox: A, folder: "INBOX" })).isError).toBe(false);
+        expect((await mcp.call("search_messages", { mailbox: B, folder: "INBOX" })).isError, "no grant on B").toBe(true);
+        expect((await mcp.call("create_draft", { mailbox: A, subject: "x", body: "y" })).isError, "no draft capability").toBe(true);
+      } finally { await mcp.close(); }
+
+      const ov = await overview();
+      expect(ov.tokens.find((t) => t.id === token.id)!.kind).toBe("api");
+      expect(ov.clients.find((c) => c.clientId === token.clientId)!.kind).toBe("api");
+    });
+
+    it("can be edited like any other token", async () => {
+      const { secret, token } = await make([A, "read"]);
+      expect((await patch(token.id, { capabilities: ["read"], grants: grants([B, "read"]) })).status).toBe(200);
+      const mcp = await new Mcp(s.base, secret).connect();
+      try {
+        expect((await mcp.call("search_messages", { mailbox: B, folder: "INBOX" })).isError).toBe(false);
+        expect((await mcp.call("search_messages", { mailbox: A, folder: "INBOX" })).isError).toBe(true);
+      } finally { await mcp.close(); }
+    });
+
+    it("stops working when revoked or expired, and its client leaves the lists and reach counts", async () => {
+      for (const end of ["revoke", "expire"] as const) {
+        const { secret, token } = await make([A, "read"]);
+        const reach = async () => (await json<MailboxDetail>(await s.admin.get(`/api/mailboxes/${A}`))).reach.map((r) => r.clientId);
+        expect(await reach()).toContain(token.clientId);
+        if (end === "revoke") expect((await s.admin.postWithCsrf(`/api/tokens/${token.id}/revoke`)).status).toBe(204);
+        else s.srv.db().prepare("UPDATE oauth_tokens SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 1000).toISOString(), token.id);
+
+        expect((await rawMcp(s.base, `Bearer ${secret}`)).status, end).toBe(401);
+        const ov = await overview();
+        expect(ov.tokens.map((t) => t.id), end).not.toContain(token.id);
+        expect(ov.clients.map((c) => c.clientId), end).not.toContain(token.clientId);
+        expect(ov.grants.map((g) => g.clientId), end).not.toContain(token.clientId);
+        expect(await reach(), end).not.toContain(token.clientId);
+        // the record stays, so audit entries still resolve to a client
+        expect((await json<ClientDetail>(await s.admin.get(`/api/clients/${token.clientId}`))).client.kind).toBe("api");
+      }
+    });
+
+    it("its client cannot enter the OAuth flow", async () => {
+      const { secret, token } = await make([A, "read"]);
+      const authorize = await s.admin.get(`/api/oauth/authorize?${new URLSearchParams({ client_id: token.clientId, redirect_uri: "https://evil.example/cb", response_type: "code" })}`);
+      expect(authorize.status).toBe(400);
+      const refresh = await fetch(`${s.base}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", client_id: token.clientId, refresh_token: secret }) });
+      expect(refresh.status).toBe(400);
+    });
+
+    it("rejects bad input without creating anything", async () => {
+      const count = () => (s.srv.db().prepare("SELECT (SELECT COUNT(*) FROM oauth_clients) AS c, (SELECT COUNT(*) FROM oauth_tokens) AS t").get()) as { c: number; t: number };
+      const before = count();
+      const ok = { name: "n", expiresInDays: 30, grants: grants([A, "read"]) };
+      for (const body of [
+        { ...ok, name: "  " },
+        { ...ok, expiresInDays: 31 },
+        { ...ok, expiresInDays: "30" },
+        { ...ok, expiresInDays: undefined },
+        { ...ok, grants: [] },
+        { ...ok, grants: grants(["no-such-mailbox", "read"]) },
+        { ...ok, grants: grants([A, "delete"]) },
+      ]) {
+        const r = await create(body);
+        expect(r.status, JSON.stringify(body)).toBe(400);
+        expect((await errorOf(r)).code).toBe("validation");
+      }
+      expect(count()).toEqual(before);
+    });
+
+    it("requires the CSRF header and an admin session", async () => {
+      const body = { name: "n", expiresInDays: 30, grants: grants([A, "read"]) };
+      const noCsrf = await s.admin.req("POST", "/api/tokens", { json: body });
+      expect(noCsrf.status).toBe(403);
+      expect((await errorOf(noCsrf)).code).toBe("csrf");
+      const anon = new Browser(s.base);
+      expect((await anon.postWithCsrf("/api/tokens", body)).status).toBe(401);
+    });
   });
 
   it("PUT /api/clients/:id/grants is unchanged", async () => {
