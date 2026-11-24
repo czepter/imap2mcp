@@ -462,11 +462,12 @@ func TestHungServerRequestsMeetDeadlinesAndDoNotDeadlock(t *testing.T) {
 
 	// 2. a queued request with a 600 ms budget must fail at ~600 ms, not wait for the holder
 	for name, call := range map[string]func(c context.Context) error{
-		"sync":  func(c context.Context) error { _, err := e.Sync(c, "mb1", "INBOX", "auto"); return err },
-		"list":  func(c context.Context) error { _, err := e.List(c, "mb1", "INBOX", 10, 0); return err },
-		"body":  func(c context.Context) error { _, err := e.FetchBody(c, "mb1", "INBOX", 1, 1, 100); return err },
-		"text":  func(c context.Context) error { _, err := e.SearchText(c, "mb1", "INBOX", "x", 10); return err },
-		"folds": func(c context.Context) error { _, err := e.ListFolders(c, "mb1"); return err },
+		"sync":   func(c context.Context) error { _, err := e.Sync(c, "mb1", "INBOX", "auto"); return err },
+		"list":   func(c context.Context) error { _, err := e.List(c, "mb1", "INBOX", 10, 0); return err },
+		"body":   func(c context.Context) error { _, err := e.FetchBody(c, "mb1", "INBOX", 1, 1, 100); return err },
+		"rawhdr": func(c context.Context) error { _, err := e.FetchRawHeader(c, "mb1", "INBOX", 1, 1, 100); return err },
+		"text":   func(c context.Context) error { _, err := e.SearchText(c, "mb1", "INBOX", "x", 10); return err },
+		"folds":  func(c context.Context) error { _, err := e.ListFolders(c, "mb1"); return err },
 	} {
 		c, cancel := short(600 * time.Millisecond)
 		t0 := time.Now()

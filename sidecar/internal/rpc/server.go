@@ -549,6 +549,22 @@ func (s *Server) call(ctx context.Context, method string, raw json.RawMessage) (
 			res["html"] = b.HTML
 		}
 		return res, nil
+	case "fetchRawHeader":
+		var p struct {
+			MailboxID   string `json:"mailboxId"`
+			Folder      string `json:"folder"`
+			UIDValidity uint32 `json:"uidValidity"`
+			UID         uint32 `json:"uid"`
+			MaxBytes    int64  `json:"maxBytes"`
+		}
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		h, err := s.eng.FetchRawHeader(ctx, p.MailboxID, p.Folder, p.UIDValidity, p.UID, p.MaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"data": h.Data, "truncated": h.Truncated}, nil
 	case "fetchAttachment":
 		var p struct {
 			MailboxID   string `json:"mailboxId"`

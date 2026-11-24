@@ -16,6 +16,7 @@ import { getBackend, type BodyResult, type Criteria, type FolderInfo, type Heade
 import { ToolError, isDefiniteRejection, normalizeError } from "./errors.js";
 import { assertMailboxUsable } from "./reliability.js";
 import { htmlToText } from "./htmlToText.js";
+import { MAX_RAW_HEADER_BYTES, parseSecurity } from "./security.js";
 
 export const MAX_PAGE = 50;
 export const MAX_BATCH = 25;
@@ -382,7 +383,7 @@ function clipUtf8(s: string, max: number): string {
   return b.subarray(0, end).toString("utf8");
 }
 
-export interface ReadMessageArgs { ref: MessageRef; include?: ("headers" | "body")[]; html?: "text" | "raw" }
+export interface ReadMessageArgs { ref: MessageRef; include?: ("headers" | "body" | "security")[]; html?: "text" | "raw" }
 
 async function readMessageImpl(ctx: TokenContext, a: ReadMessageArgs) {
   const { ref } = a;
@@ -390,7 +391,9 @@ async function readMessageImpl(ctx: TokenContext, a: ReadMessageArgs) {
   const want = new Set(a.include && a.include.length ? a.include : ["headers", "body"]);
   const headers = want.has("headers") && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers");
   const body = want.has("body") && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_body");
-  if (!headers && !body) deniedRead(ctx, ref);
+  // security (Authentication-Results, Reply-To, ...) is parsed from the header block and needs read_headers only.
+  const wantSec = want.has("security") && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers");
+  if (!headers && !body && !wantSec) deniedRead(ctx, ref);
   const b = getBackend();
 
   let h: Header | undefined;
@@ -407,10 +410,25 @@ async function readMessageImpl(ctx: TokenContext, a: ReadMessageArgs) {
   let bodyRes: BodyResult | undefined;
   if (body) bodyRes = await b.fetchBody(ref.mailbox, ref.folder, ref.uidValidity, ref.uid, MAX_HTML_SOURCE_BYTES);
 
+  let secRaw: string | undefined;
+  if (wantSec) {
+    try {
+      const r = await b.fetchRawHeader(ref.mailbox, ref.folder, ref.uidValidity, ref.uid, MAX_RAW_HEADER_BYTES);
+      if (!r.raw) throw new ToolError("UPSTREAM_ERROR", "Could not read message headers");
+      secRaw = r.raw;
+    } catch (e) {
+      if (e instanceof PolicyError || (e instanceof ToolError && (e.code === "STALE_REFERENCE" || e.code === "NOT_FOUND"))) throw e;
+      // Optional part: when something else was returned, omit `security` and keep the rest unchanged.
+      if (!headers && !body) throw e;
+      log.warn("read_message security headers unavailable", { mailboxId: ref.mailbox, errorCode: normalizeError(e, true).code });
+    }
+  }
+
   // Recheck after the data arrived: revocation in the meantime withholds the corresponding part.
   const headersOut = headers && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers") ? h : undefined;
   const bodyOut = body && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_body") ? bodyRes : undefined;
-  if (!headersOut && !bodyOut) deniedRead(ctx, ref);
+  const secOut = wantSec && secRaw !== undefined && isOpAllowed(ctx, ref.mailbox, ref.folder, "read_headers") ? secRaw : undefined;
+  if (!headersOut && !bodyOut && secOut === undefined) deniedRead(ctx, ref);
 
   const out: Record<string, unknown> = { ref };
   if (headersOut) {
@@ -437,6 +455,7 @@ async function readMessageImpl(ctx: TokenContext, a: ReadMessageArgs) {
   } else if (want.has("body")) {
     out.bodyDenied = true; // the caller learns only about its own rights, never about the mailbox
   }
+  if (secOut !== undefined) out.security = parseSecurity(secOut);
   return out;
 }
 

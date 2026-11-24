@@ -1,5 +1,5 @@
 import { getSidecar } from "../sidecar/index.js";
-import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, FolderInfo, Header, PageResult, ReadBackend } from "./backend.js";
+import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, FolderInfo, Header, PageResult, RawHeaderResult, ReadBackend } from "./backend.js";
 
 const SIDECAR_CAP = 500;
 
@@ -66,6 +66,11 @@ export const sidecarBackend: ReadBackend = {
     const r = await getSidecar().callMailbox<{ text?: string; html?: string; truncated?: boolean; attachments?: WireAttachment[] }>(
       mailbox, "fetchBody", { folder, uidValidity, uid, maxBytes });
     return { text: r.text, html: r.html, truncated: !!r.truncated, attachments: (r.attachments ?? []).map(attachment) };
+  },
+
+  async fetchRawHeader(mailbox, folder, uidValidity, uid, maxBytes): Promise<RawHeaderResult> {
+    const r = await getSidecar().callMailbox<{ data?: string; truncated?: boolean }>(mailbox, "fetchRawHeader", { folder, uidValidity, uid, maxBytes });
+    return { raw: typeof r.data === "string" ? Buffer.from(r.data, "base64").toString("utf8") : "", truncated: !!r.truncated };
   },
 
   async fetchAttachment(mailbox, folder, uidValidity, uid, part, maxBytes): Promise<AttachmentResult> {

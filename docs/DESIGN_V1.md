@@ -43,7 +43,7 @@ v0 compatibility shims `assertAllowed/allowedMailboxes` stay exported (mapping t
 Leakage rules: search never touches or counts folders where `search` is denied; search results also require `read_headers` per result folder; `read_message` header portion needs `read_headers`, body needs `read_body` (tool returns headers only if body denied); cached data is returned only after the same checks; error messages never reveal whether a denied folder exists.
 
 ## MCP tool changes
-Existing seven tools keep names and schemas (additive fields only). `search_messages`/`list` accept optional `folder` (omitted => all folders where search+read_headers allowed). `read_message` gets `include: ["headers","body"]` (default both, each subject to policy). Read paths use the sidecar; if the sidecar is unavailable, tools return `UPSTREAM_ERROR` (no silent fallback to unauthenticated paths; v0 direct path may remain behind `SIDECAR_DISABLED=1` for debugging only).
+Existing seven tools keep names and schemas (additive fields only). `search_messages`/`list` accept optional `folder` (omitted => all folders where search+read_headers allowed). `read_message` gets `include: ["headers","body","security"]` (default headers and body, each subject to policy; `security` needs `read_headers` and returns values parsed in Node from the raw header block of the one message). Read paths use the sidecar; if the sidecar is unavailable, tools return `UPSTREAM_ERROR` (no silent fallback to unauthenticated paths; v0 direct path may remain behind `SIDECAR_DISABLED=1` for debugging only).
 
 ## Sidecar RPC (all requests `{jsonrpc:"2.0",id,method,params:{auth,...}}`)
 | method | params | result |
@@ -57,6 +57,7 @@ Existing seven tools keep names and schemas (additive fields only). `search_mess
 | `search` | `{mailboxId, folder, criteria, limit, beforeUid?}` | same shape as list |
 | `searchText` | `{mailboxId, folder, text, limit}` | remote IMAP search, `{uidValidity, uids:[...]}` |
 | `fetchHeaders` | `{mailboxId, folder, uidValidity, uids[]}` | `{items:[Header]}`; stale uidValidity => error `STALE_REFERENCE` (-32010) |
+| `fetchRawHeader` | `{mailboxId, folder, uidValidity, uid, maxBytes}` | `{data (base64), truncated}`; the raw header block via `BODY.PEEK[HEADER]<0.max>` (max clamped to 262144), never cached; stale uidValidity or a vanished message answer `-32010` |
 | `fetchBody` | `{mailboxId, folder, uidValidity, uid, maxBytes}` | `{text, html?, truncated, attachments:[{part, filename?, contentType, disposition?, contentId?, size}]}` using BODY.PEEK; the attachment list comes from BODYSTRUCTURE in the same FETCH |
 | `fetchAttachment` | `{mailboxId, folder, uidValidity, uid, part, maxBytes}` | `{found:false}` if `part` is not an attachment of the message, else `{found:true, attachment, tooLarge, data?}` with `data` the decoded bytes (base64 in JSON); BODY.PEEK[part] |
 | `invalidate` | `{mailboxId, folder?}` | `{ok:true}` marks stale; next call syncs |

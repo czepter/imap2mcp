@@ -1,7 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import { withImap } from "../imap/client.js";
 import { ToolError } from "./errors.js";
-import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, Criteria, Header, PageResult, ReadBackend } from "./backend.js";
+import type { Addr, AttachmentInfo, AttachmentResult, BodyResult, Criteria, Header, PageResult, RawHeaderResult, ReadBackend } from "./backend.js";
 
 /** v0 direct IMAP read path. Debug only (SIDECAR_DISABLED=1); same interface and semantics as the sidecar backend. */
 
@@ -144,6 +144,19 @@ export const directBackend: ReadBackend = {
       let s: string;
       try { s = new TextDecoder(chosen.parameters?.charset || "utf-8").decode(buf); } catch { s = new TextDecoder("utf-8").decode(buf); }
       return chosen === html && !plain ? { html: s, truncated, attachments } : { text: s, truncated, attachments };
+    }));
+  },
+
+  async fetchRawHeader(mailbox, folder, uidValidity, uid, maxBytes): Promise<RawHeaderResult> {
+    return withImap(mailbox, (c) => withFolder(c, folder, async () => {
+      if (uidValidityOf(c) !== uidValidity) throw new ToolError("STALE_REFERENCE", "Message reference is stale (UIDVALIDITY changed); search again.");
+      // BODY.PEEK[HEADER]<0.n>: one partial fetch of the header block, \Seen untouched.
+      const m = await c.fetchOne(String(uid), { uid: true, bodyParts: [{ key: "HEADER", start: 0, maxLength: maxBytes + 1 }] }, { uid: true });
+      if (!m) throw new ToolError("NOT_FOUND", "Message not found");
+      let buf = m.headers ?? Buffer.alloc(0); // imapflow files the HEADER section under `headers`
+      let truncated = false;
+      if (buf.length > maxBytes) { buf = buf.subarray(0, maxBytes); truncated = true; }
+      return { raw: new TextDecoder("utf-8").decode(buf), truncated };
     }));
   },
 

@@ -24,6 +24,8 @@ export interface PageResult { uidValidity: number; items: Header[]; nextBeforeUi
 export interface AttachmentInfo {
   part: string; filename: string | null; contentType: string; disposition: string | null; contentId: string | null; size: number;
 }
+/** Raw RFC 5322 header block of one message (BODY.PEEK[HEADER], at most maxBytes, decoded as UTF-8). */
+export interface RawHeaderResult { raw: string; truncated: boolean }
 export interface BodyResult { text?: string; html?: string; truncated: boolean; attachments: AttachmentInfo[] }
 
 /** A fetched attachment. `data` is absent when the part is no attachment of the message (`found: false`) or too large. */
@@ -39,6 +41,8 @@ export interface ReadBackend {
   searchText(mailbox: string, folder: string, text: string, limit: number): Promise<{ uidValidity: number; uids: number[] }>;
   fetchHeaders(mailbox: string, folder: string, uidValidity: number, uids: number[]): Promise<Header[]>;
   fetchBody(mailbox: string, folder: string, uidValidity: number, uid: number, maxBytes: number): Promise<BodyResult>;
+  /** Raw header block of one message, capped at maxBytes (BODY.PEEK, never sets \Seen, never cached). */
+  fetchRawHeader(mailbox: string, folder: string, uidValidity: number, uid: number, maxBytes: number): Promise<RawHeaderResult>;
   /** Fetch one attachment part (decoded, BODY.PEEK). Only parts listed in BodyResult.attachments can be fetched. */
   fetchAttachment(mailbox: string, folder: string, uidValidity: number, uid: number, part: string, maxBytes: number): Promise<AttachmentResult>;
 }
