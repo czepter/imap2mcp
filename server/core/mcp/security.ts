@@ -175,8 +175,8 @@ function parseResult(seg: string): AuthResult | null {
   return { method: m[1].toLowerCase(), verdict: verdictOf(m[2]), props };
 }
 
-/** Stands in for the authserv-id of a header that has none (Microsoft 365 / Outlook.com): never equal to a real id. */
-const NO_ID = "\0none";
+/** Stands in for the authserv-id of a header that has none (Microsoft 365 / Outlook.com): never equal to a real id (a token containing `=` maps here, so no token can equal it otherwise). */
+const NO_ID = "=";
 
 /** Lowercased authserv-id; NO_ID when the header starts directly with a result (`spf=pass ...`); "" when unusable. */
 const authservId = (value: string): string => {
@@ -194,12 +194,13 @@ function parseAuth(arValues: string[], receivedSpf: string | undefined): Securit
   let dmarcSeen = false;
   let dkimSeen = false;
 
-  // Trusted: the topmost header's authserv-id. Only the contiguous run below it with the same id is used.
+  // Trusted: the topmost header's authserv-id. Only the contiguous run below it with the same id is used; a top header without id is used alone.
   const trusted = arValues.length ? authservId(arValues[0]) : "";
   if (trusted) {
     const used: string[] = [];
     for (const v of arValues) {
-      if (used.length >= MAX_AR_HEADERS || authservId(v) !== trusted) break;
+      // An id-less header gives nothing to match later headers against (a forger can plant one): it is used alone.
+      if (used.length >= MAX_AR_HEADERS || (trusted === NO_ID && used.length >= 1) || authservId(v) !== trusted) break;
       used.push(v);
     }
     for (const v of used) {

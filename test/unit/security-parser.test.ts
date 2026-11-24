@@ -150,6 +150,16 @@ describe("parseSecurity: Authentication-Results", () => {
     expect(r.auth.raw).toHaveLength(1);
   });
 
+  it("a top header without authserv-id is used alone: a planted id-less header below it has no influence", () => {
+    const r = parse(
+      "Authentication-Results: spf=fail smtp.mailfrom=a@x.example; dkim=none; dmarc=fail",
+      "Authentication-Results: spf=pass; dkim=pass header.d=bank.example; dmarc=pass",
+    );
+    expect(r.auth).toMatchObject({ spf: "fail", dkim: "none", dmarc: "fail", dkimDomains: [] });
+    expect(r.auth.raw).toHaveLength(1);
+    expect(r.auth.raw[0]).toContain("dkim=none");
+  });
+
   it("an id-less header below a real one is not used", () => {
     const r = parse("Authentication-Results: mx.recv.example; dmarc=pass", "Authentication-Results: spf=pass");
     expect(r.auth).toMatchObject({ dmarc: "pass", spf: null });
