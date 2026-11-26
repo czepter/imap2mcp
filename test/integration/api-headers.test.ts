@@ -14,7 +14,9 @@ const haveOpenssl = !!makeSelfSignedCert();
 const directives = (csp: string): Map<string, string[]> =>
   new Map(csp.split(";").map((d) => d.trim()).filter(Boolean).map((d) => { const [name, ...vals] = d.split(/\s+/); return [name.toLowerCase(), vals] as const; }));
 
-const assetsOf = (html: string): string[] => [...html.matchAll(/(?:src|href)="(\/_nuxt\/[^"?#]+)"/g)].map((m) => m[1]).sort();
+// The shell's assets (entry script and stylesheet), without the route-specific <link rel="modulepreload"|"prefetch"> hints:
+// Nuxt 4.7 preloads the chunks of the matched route and prefetches the rest, so those differ per path.
+const assetsOf = (html: string): string[] => [...html.replace(/<link\b[^>]*\brel="(?:modulepreload|prefetch)"[^>]*>/g, "").matchAll(/(?:src|href)="(\/_nuxt\/[^"?#]+)"/g)].map((m) => m[1]).sort();
 
 /** Headers the contract wants on every response. */
 function expectBaseHeaders(r: Response, what: string) {
